@@ -4,8 +4,7 @@ import { Logger } from './logger.js';
 import { JsonFileStore } from './store/json-file.js';
 import { ClaudeSDKProvider } from './providers/claude-sdk.js';
 import { BridgeManager } from './engine/coordinators/bridge-manager.js';
-import { createAdapter, loadAdapters } from './channels/index.js';
-import type { ChannelType } from './channels/types.js';
+import { FeishuAdapter } from './channels/feishu/adapter.js';
 import { checkForUpdates, getCurrentVersion, isVersionNotified, markVersionNotified } from './utils/version-checker.js';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, readFileSync, unlinkSync, existsSync } from 'node:fs';
@@ -34,6 +33,8 @@ interface UpgradeResult {
   chatId?: string;
   channelType?: string;
   timestamp: string;
+  attempts?: number;
+  lastError?: string;
 }
 
 function readUpgradeResult(): UpgradeResult | null {
@@ -42,12 +43,22 @@ function readUpgradeResult(): UpgradeResult | null {
   if (!existsSync(resultFile)) return null;
   try {
     const data = JSON.parse(readFileSync(resultFile, 'utf-8')) as UpgradeResult;
-    // Clean up after reading
-    unlinkSync(resultFile);
     return data;
   } catch {
     return null;
   }
+}
+
+function writeUpgradeResult(data: UpgradeResult): void {
+  const runtimeDir = getTliveRuntimeDir();
+  mkdirSync(runtimeDir, { recursive: true });
+  writeFileSync(join(runtimeDir, 'upgrade-result.json'), JSON.stringify(data, null, 2));
+}
+
+function deleteUpgradeResult(): void {
+  try {
+    unlinkSync(join(getTliveRuntimeDir(), 'upgrade-result.json'));
+  } catch {}
 }
 
 /**
@@ -147,18 +158,20 @@ export async function main() {
 
   const logger = new Logger(
     join(tliveHome, 'logs', 'bridge.log'),
-    [config.token, config.telegram.botToken, config.feishu.appSecret].filter(Boolean)
+    [config.token, config.feishu.appSecret].filter(Boolean)
   );
   logger.installConsoleInterception();
 
   logger.info('TLive Bridge starting...');
-  logger.info(`Enabled channels: ${config.enabledChannels.join(', ') || 'none'}`);
+  logger.info('Enabled channel: feishu');
+
+  const startedAt = new Date().toISOString();
 
   // Write startup status
   writeStatusFile({
     pid: process.pid,
-    startedAt: new Date().toISOString(),
-    channels: config.enabledChannels,
+    startedAt,
+    channels: ['feishu'],
     version: getCurrentVersion(),
   });
 
@@ -175,22 +188,18 @@ export async function main() {
 
   // Start Bridge Manager with enabled IM adapters
   const manager = new BridgeManager({ store, llm, defaultWorkdir: config.defaultWorkdir, config });
-
-  // Dynamically load only the adapters we need (reduces memory from ~180MB to ~60MB)
-  await loadAdapters(config.enabledChannels);
-
-  for (const channelType of config.enabledChannels) {
-    try {
-      const adapter = createAdapter(channelType as ChannelType);
-      manager.registerAdapter(adapter);
-      logger.info(`Registered ${channelType} adapter`);
-    } catch (err) {
-      logger.warn(`Failed to create ${channelType} adapter: ${err}`);
-    }
-  }
+  manager.registerAdapter(new FeishuAdapter(config.feishu));
+  logger.info('Registered feishu adapter');
 
   await manager.start();
   logger.info('Bridge started');
+  writeStatusFile({
+    pid: process.pid,
+    startedAt,
+    readyAt: new Date().toISOString(),
+    channels: ['feishu'],
+    version: getCurrentVersion(),
+  });
 
   // Check for upgrade result from previous session and notify user
   const upgradeResult = readUpgradeResult();
@@ -200,19 +209,31 @@ export async function main() {
       ? `✅ 升级成功\n版本: v${previousVersion} → v${version}\n查看更新: https://github.com/huanghuoguoguo/tlive/releases`
       : `❌ 升级失败\n错误: ${error || 'Unknown error'}\n版本: v${previousVersion}`;
 
-    // Send to specific chat if we have the info, otherwise broadcast
-    if (chatId && channelType) {
-      const adapter = manager.getAdapter(channelType);
-      if (adapter) {
-        adapter.send({ chatId, text }).catch((err) => {
-          logger.warn(`Failed to send upgrade result to ${channelType}: ${err}`);
-        });
-      } else {
-        // Fallback to broadcast if adapter not available
-        manager.broadcastText(text).catch(() => {});
+    let delivered = false;
+    try {
+      if (chatId && channelType) {
+        const adapter = manager.getAdapter(channelType);
+        if (adapter) {
+          await adapter.send({ chatId, text });
+          delivered = true;
+        }
       }
+      if (!delivered) {
+        await manager.broadcastText(text);
+        delivered = true;
+      }
+    } catch (err) {
+      logger.warn(`Failed to send upgrade result notification: ${err}`);
+    }
+
+    if (delivered) {
+      deleteUpgradeResult();
     } else {
-      manager.broadcastText(text).catch(() => {});
+      writeUpgradeResult({
+        ...upgradeResult,
+        attempts: (upgradeResult.attempts ?? 0) + 1,
+        lastError: 'Failed to send upgrade result notification',
+      });
     }
     logger.info(`Upgrade result: ${success ? 'success' : 'failed'} (${previousVersion} → ${version})`);
   }

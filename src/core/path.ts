@@ -4,6 +4,8 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync, unlinkSync } from '
 
 /** Get TLive home directory path */
 export function getTliveHome(): string {
+  const override = process.env.TLIVE_HOME?.trim();
+  if (override) return override;
   return join(homedir(), '.tlive');
 }
 

@@ -12,13 +12,16 @@ const [,, command, ...args] = process.argv;
 const PACKAGE_ROOT = join(__dirname, '..');
 const isWindows = process.platform === 'win32';
 const REPO = 'huanghuoguoguo/tlive';
-const TLIVE_HOME = join(homedir(), '.tlive');
+const TLIVE_HOME = process.env.TLIVE_HOME?.trim() || join(homedir(), '.tlive');
 const RUNTIME_DIR = join(TLIVE_HOME, 'runtime');
 const LOG_DIR = join(TLIVE_HOME, 'logs');
 const BRIDGE_PID = join(RUNTIME_DIR, 'bridge.pid');
 const BRIDGE_ENTRY = join(PACKAGE_ROOT, 'dist', 'main.mjs');
 const CONFIG_FILE = join(TLIVE_HOME, 'config.env');
 const UPGRADE_RESULT_FILE = join(RUNTIME_DIR, 'upgrade-result.json');
+const STATUS_FILE = join(RUNTIME_DIR, 'status.json');
+const RELEASE_BASE_URL = process.env.TLIVE_RELEASE_BASE_URL?.trim();
+const RELEASE_TARBALL_PATH = process.env.TLIVE_RELEASE_TARBALL_PATH?.trim();
 
 function getVersion() {
   try {
@@ -58,6 +61,9 @@ function toReleaseTag(version) {
 
 function getReleaseDownloadUrl(version) {
   const tag = toReleaseTag(version);
+  if (RELEASE_BASE_URL) {
+    return `${RELEASE_BASE_URL.replace(/\/$/, '')}/${tag}/tlive-${tag}.tar.gz`;
+  }
   return `https://github.com/${REPO}/releases/download/${tag}/tlive-${tag}.tar.gz`;
 }
 
@@ -98,6 +104,20 @@ function runPostinstall(appDir) {
   execSync(`${process.execPath} scripts/postinstall.js`, { stdio: 'inherit', cwd: appDir });
 }
 
+function restoreBackup(backupDir) {
+  if (!backupDir || !existsSync(backupDir)) {
+    throw new Error('No backup install available for rollback');
+  }
+
+  if (existsSync(PACKAGE_ROOT)) {
+    const failedDir = `${PACKAGE_ROOT}-failed-${Date.now()}`;
+    renameSync(PACKAGE_ROOT, failedDir);
+    console.warn(`Moved failed install to: ${failedDir}`);
+  }
+
+  renameSync(backupDir, PACKAGE_ROOT);
+}
+
 async function upgradeFromRelease(version) {
   mkdirSync(TLIVE_HOME, { recursive: true });
   const tempRoot = mkdtempSync(join(TLIVE_HOME, 'upgrade-'));
@@ -108,12 +128,20 @@ async function upgradeFromRelease(version) {
   let movedCurrentInstall = false;
 
   try {
-    console.log('Downloading release package...');
-    await downloadFile(getReleaseDownloadUrl(version), tarball);
+    if (RELEASE_TARBALL_PATH) {
+      console.log('Using local release package...');
+      copyFileSync(RELEASE_TARBALL_PATH, tarball);
+    } else {
+      console.log('Downloading release package...');
+      await downloadFile(getReleaseDownloadUrl(version), tarball);
+    }
 
     console.log('Extracting package...');
     mkdirSync(stagedDir, { recursive: true });
-    execSync(`tar xzf "${tarball}" -C "${stagedDir}"`, { stdio: 'inherit' });
+    const tarResult = spawnSync('tar', ['xzf', tarball, '-C', stagedDir], { stdio: 'inherit' });
+    if (tarResult.status !== 0) {
+      throw new Error('Failed to extract release package. Make sure tar is available in PATH.');
+    }
 
     console.log('Installing production dependencies...');
     installProductionDeps(stagedDir);
@@ -140,7 +168,7 @@ async function upgradeFromRelease(version) {
   }
 }
 
-async function waitForProcessExit(pid, timeoutMs = 15000) {
+async function waitForProcessExit(pid, timeoutMs = 30000) {
   if (!Number.isFinite(pid) || pid <= 0) return;
   const startedAt = Date.now();
 
@@ -150,6 +178,71 @@ async function waitForProcessExit(pid, timeoutMs = 15000) {
   }
 
   throw new Error(`Timed out waiting for process ${pid} to exit`);
+}
+
+async function terminateProcess(pid, label = 'process', timeoutMs = 30000) {
+  if (!Number.isFinite(pid) || pid <= 0 || !isProcessRunning(pid)) return;
+
+  console.log(`Stopping ${label} (PID ${pid})...`);
+  try {
+    process.kill(pid, 'SIGTERM');
+  } catch {}
+
+  try {
+    await waitForProcessExit(pid, timeoutMs);
+    return;
+  } catch {
+    console.warn(`${label} did not exit after SIGTERM; forcing shutdown...`);
+  }
+
+  try {
+    process.kill(pid, 'SIGKILL');
+  } catch {}
+  await waitForProcessExit(pid, 10000);
+}
+
+function readStatusFile() {
+  try {
+    return JSON.parse(readFileSync(STATUS_FILE, 'utf-8'));
+  } catch {
+    return null;
+  }
+}
+
+async function waitForBridgeHealthy(expectedVersion, startedAfterMs, timeoutMs = 30000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const pid = getBridgePid();
+    if (!pid) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      continue;
+    }
+
+    const status = readStatusFile();
+    const statusReadyAt = status?.readyAt ? Date.parse(status.readyAt) : 0;
+    const statusIsFresh = Number.isFinite(statusReadyAt) && statusReadyAt >= startedAfterMs - 1000;
+    const versionMatches = !expectedVersion || status?.version === expectedVersion;
+    const hasFeishu = Array.isArray(status?.channels) && status.channels.includes('feishu');
+    if (statusIsFresh && versionMatches && hasFeishu) {
+      return { pid, status };
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+
+  throw new Error(`Bridge did not become healthy within ${timeoutMs / 1000}s`);
+}
+
+async function stopBridgeIfRunning(timeoutMs = 30000) {
+  const pid = getBridgePid();
+  if (!pid) {
+    try { unlinkSync(BRIDGE_PID); } catch {}
+    return false;
+  }
+
+  await terminateProcess(pid, 'Bridge', timeoutMs);
+  try { unlinkSync(BRIDGE_PID); } catch {}
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -213,24 +306,20 @@ function daemonStart() {
   const existing = getBridgePid();
   if (existing) {
     console.log(`Bridge is already running (PID ${existing})`);
-    return;
+    return existing;
   }
 
   if (!existsSync(BRIDGE_ENTRY)) {
-    console.error('ERROR: Bridge not built.');
-    console.error(`Build: cd ${join(PACKAGE_ROOT, 'bridge')} && npm install && npm run build`);
-    process.exit(1);
+    throw new Error(`Bridge not built: ${BRIDGE_ENTRY}`);
   }
 
   const config = loadConfigEnv();
-  const runtime = process.env.TL_RUNTIME || config.TL_RUNTIME || 'claude';
 
-  console.log(`Starting Bridge (runtime: ${runtime})...`);
+  console.log('Starting Bridge...');
 
   const env = {
     ...process.env,
     ...config,
-    TL_RUNTIME: runtime,
     TL_DEFAULT_WORKDIR: process.env.TL_DEFAULT_WORKDIR || process.cwd(),
   };
 
@@ -246,27 +335,20 @@ function daemonStart() {
 
   console.log(`Bridge started (PID ${child.pid})`);
 
+  return child.pid;
 }
 
-function daemonStop() {
-  const pid = getBridgePid();
-  if (pid) {
-    console.log(`Stopping Bridge (PID ${pid})...`);
-    try { process.kill(pid); } catch {}
-    try { unlinkSync(BRIDGE_PID); } catch {}
+async function daemonStop() {
+  if (await stopBridgeIfRunning()) {
     console.log('Bridge stopped.');
   } else {
     console.log('Bridge is not running.');
-    // Clean up stale pid file
-    try { unlinkSync(BRIDGE_PID); } catch {}
   }
 }
 
 async function daemonStatus() {
   console.log('=== TLive Status ===');
 
-  const config = loadConfigEnv();
-  const runtime = process.env.TL_RUNTIME || config.TL_RUNTIME || 'claude';
   const pid = getBridgePid();
 
   // Read status.json for bridge details
@@ -288,7 +370,7 @@ async function daemonStatus() {
     const startedAt = statusData?.startedAt;
     const uptime = startedAt ? formatUptime(new Date(startedAt)) : 'unknown';
     const channels = statusData?.channels || [];
-    console.log(`Bridge:       running (PID ${pid}, runtime: ${runtime})`);
+    console.log(`Bridge:       running (PID ${pid})`);
     console.log(`Version:      ${version}`);
     console.log(`Uptime:       ${uptime}`);
     console.log(`Channels:     ${channels.join(', ') || 'none'}`);
@@ -301,12 +383,17 @@ async function daemonStatus() {
   }
 
   // Show active sessions from bindings
-  if (bindings && Object.keys(bindings).length > 0) {
+  const supportedChannels = new Set(statusData?.channels?.length ? statusData.channels : ['feishu']);
+  const activeBindings = bindings
+    ? Object.entries(bindings).filter(([, binding]) => supportedChannels.has(binding.channelType))
+    : [];
+
+  if (activeBindings.length > 0) {
     console.log('');
     console.log('=== Active Sessions ===');
-    for (const [key, binding] of Object.entries(bindings)) {
+    for (const [key, binding] of activeBindings) {
       const { channelType, chatId, cwd, createdAt } = binding;
-      const channelIcon = channelType === 'telegram' ? '📱' : channelType === 'feishu' ? '🚀' : channelType === 'qqbot' ? '💬' : '❓';
+      const channelIcon = channelType === 'feishu' ? '🚀' : '•';
       const workdir = cwd ? ` (${cwd})` : '';
       const age = createdAt ? formatAge(new Date(createdAt)) : 'unknown';
       console.log(`${channelIcon} ${channelType}:${chatId.slice(-8)}${workdir} — ${age}`);
@@ -419,9 +506,11 @@ async function runDoctor() {
     console.log('  config.env: OK');
     const config = loadConfigEnv();
     console.log(config.TL_TOKEN ? '  TL_TOKEN: set' : '  TL_TOKEN: NOT SET');
-    console.log(config.TL_TG_BOT_TOKEN ? '  Telegram: configured' : '  Telegram: not configured');
-    console.log(config.TL_FS_APP_ID ? '  Feishu:   configured' : '  Feishu:   not configured');
-    console.log(config.TL_QQ_APP_ID ? '  QQ Bot:   configured' : '  QQ Bot:   not configured');
+    console.log(
+      config.TL_FS_APP_ID && config.TL_FS_APP_SECRET
+        ? '  Feishu:   configured'
+        : '  Feishu:   not configured',
+    );
   } else {
     console.log("  config.env: NOT FOUND (run 'tlive setup')");
   }
@@ -437,7 +526,7 @@ async function runDoctor() {
   const bindingsFile = join(TLIVE_HOME, 'data', 'bindings.json');
   try {
     const bindings = JSON.parse(readFileSync(bindingsFile, 'utf-8'));
-    const count = Object.keys(bindings).length;
+    const count = Object.values(bindings).filter(binding => binding?.channelType === 'feishu').length;
     console.log(count > 0 ? `  Sessions: ${count} active` : '  Sessions: none');
   } catch {
     console.log('  Sessions: (no data)');
@@ -454,11 +543,11 @@ Usage:
   tlive <subcommand>         Manage TLive services
 
 Setup (one-time):
-  tlive setup                Configure IM platforms (Telegram/Feishu/QQ Bot)
+  tlive setup                Configure Feishu/Lark
   tlive install skills       Install /tlive skill to Claude Code
 
 Service Management:
-  tlive start [--runtime R]  Start IM Bridge (R: claude|codex, default: claude)
+  tlive start                Start Feishu Bridge for Claude Code
   tlive stop                 Stop IM Bridge daemon
   tlive status               Show Bridge status
   tlive logs [N]             Show last N log lines (default: 50)
@@ -466,9 +555,8 @@ Service Management:
   tlive upgrade [version]    Upgrade to latest or specified version
   tlive version              Show version info
 
-IM Commands (in Telegram/Feishu/QQ Bot):
+IM Commands (in Feishu/Lark):
   /new                       New conversation
-  /runtime claude|codex      Switch AI provider
   /perm on|off               Permission prompts
   /stop                      Interrupt execution
   /sessions                  List recent sessions
@@ -522,24 +610,21 @@ switch (command) {
   }
 
   case 'start': {
-    // Parse --runtime flag
-    const rtIdx = args.indexOf('--runtime');
-    if (rtIdx !== -1 && args[rtIdx + 1]) {
-      const rt = args[rtIdx + 1].toLowerCase();
-      if (['claude', 'codex'].includes(rt)) {
-        process.env.TL_RUNTIME = rt;
-        console.log(`Runtime: ${rt}`);
-      } else {
-        console.error(`Unknown runtime: ${rt}. Use: claude | codex`);
-        process.exit(1);
-      }
+    if (args.includes('--runtime')) {
+      console.error('Runtime selection has been removed; TLive now runs Claude Code only.');
+      process.exit(1);
     }
-    daemonStart();
+    try {
+      daemonStart();
+    } catch (err) {
+      console.error(`Failed to start bridge: ${err.message || err}`);
+      process.exit(1);
+    }
     break;
   }
 
   case 'stop':
-    daemonStop();
+    await daemonStop();
     break;
 
   case 'status':
@@ -601,6 +686,7 @@ switch (command) {
     const fromVersion = process.env.TLIVE_UPGRADE_FROM_VERSION || current;
     const requestedVersion = normalizeRequestedVersion(args[0]);
     const bridgeWasRunning = Boolean(getBridgePid()) || Boolean(process.env.TLIVE_UPGRADE_PARENT_PID);
+    const shouldNotifyUpgrade = bridgeWasRunning || Boolean(process.env.TLIVE_UPGRADE_CHAT_ID);
     console.log(`Current version: ${current}`);
 
     // Check latest version from GitHub
@@ -622,7 +708,9 @@ switch (command) {
       } catch (e) {
         const errorMsg = 'Failed to check latest version. Are you online?';
         console.error(errorMsg);
-        writeUpgradeResult({ success: false, version: current, previousVersion: fromVersion, error: errorMsg });
+        if (shouldNotifyUpgrade) {
+          writeUpgradeResult({ success: false, version: current, previousVersion: fromVersion, error: errorMsg });
+        }
         process.exit(1);
       }
     }
@@ -645,38 +733,79 @@ switch (command) {
         console.error('\n' + errorMsg);
         console.error(`Update this checkout manually with git, or install the packaged build with:`);
         console.error(`  ${getManualInstallCommand()}`);
-        writeUpgradeResult({ success: false, version: current, previousVersion: fromVersion, error: errorMsg });
+        if (shouldNotifyUpgrade) {
+          writeUpgradeResult({ success: false, version: current, previousVersion: fromVersion, error: errorMsg });
+        }
         process.exit(1);
       } else {
         const parentPid = Number.parseInt(process.env.TLIVE_UPGRADE_PARENT_PID || '', 10);
         if (Number.isFinite(parentPid) && parentPid > 0) {
           console.log(`Waiting for running bridge (PID ${parentPid}) to exit...`);
-          await waitForProcessExit(parentPid);
+          try {
+            await waitForProcessExit(parentPid, 60000);
+          } catch {
+            await terminateProcess(parentPid, 'parent bridge', 10000);
+          }
         }
+
+        if (getBridgePid()) {
+          await stopBridgeIfRunning(30000);
+        }
+
         console.log('Upgrading from GitHub Release package...');
         const backupDir = await upgradeFromRelease(latest);
         console.log(`\nNew version installed at: ${PACKAGE_ROOT}`);
         console.log(`Previous version backed up at: ${backupDir}`);
+
+        if (bridgeWasRunning) {
+          console.log('\nRestarting bridge...');
+          if (shouldNotifyUpgrade) {
+            writeUpgradeResult({ success: true, version: latest, previousVersion: fromVersion });
+          }
+          const startedAfterMs = Date.now();
+          try {
+            daemonStart();
+            const health = await waitForBridgeHealthy(latest, startedAfterMs, 30000);
+            console.log(`Bridge healthy (PID ${health.pid}, version ${health.status.version})`);
+          } catch (startErr) {
+            const startErrorMsg = startErr.message || String(startErr);
+            console.error(`New bridge failed to start: ${startErrorMsg}`);
+            if (shouldNotifyUpgrade) {
+              writeUpgradeResult({
+                success: false,
+                version: latest,
+                previousVersion: fromVersion,
+                error: `New bridge failed to start after upgrade: ${startErrorMsg}. Rolled back to v${fromVersion}.`,
+              });
+            }
+
+            await stopBridgeIfRunning(10000);
+            restoreBackup(backupDir);
+            throw new Error(`Upgrade rolled back because the new bridge failed to start: ${startErrorMsg}`);
+          }
+        } else if (shouldNotifyUpgrade) {
+          writeUpgradeResult({ success: true, version: latest, previousVersion: fromVersion });
+        }
       }
 
       console.log(`\n✅ Upgraded to ${latest}.`);
       console.log('\nChangelog: https://github.com/huanghuoguoguo/tlive/releases');
-
-      // Write success result for bridge to notify user
-      writeUpgradeResult({ success: true, version: latest, previousVersion: fromVersion });
-
-      if (bridgeWasRunning) {
-        console.log('\nRestarting bridge...');
-        if (getBridgePid()) {
-          daemonStop();
-          await new Promise((resolve) => setTimeout(resolve, 1000));
-        }
-        daemonStart();
-      }
     } catch (err) {
       const errorMsg = err.message || err;
       console.error(`Upgrade failed: ${errorMsg}`);
-      writeUpgradeResult({ success: false, version: current, previousVersion: fromVersion, error: errorMsg });
+      if (shouldNotifyUpgrade) {
+        writeUpgradeResult({ success: false, version: current, previousVersion: fromVersion, error: errorMsg });
+      }
+      if (bridgeWasRunning && !getBridgePid() && existsSync(BRIDGE_ENTRY)) {
+        try {
+          const restartStartedAt = Date.now();
+          daemonStart();
+          await waitForBridgeHealthy(getVersion(), restartStartedAt, 30000);
+          console.error('Previous bridge restarted after failed upgrade.');
+        } catch (restartErr) {
+          console.error(`Failed to restart bridge after failed upgrade: ${restartErr.message || restartErr}`);
+        }
+      }
       process.exit(1);
     }
     break;
@@ -771,7 +900,7 @@ switch (command) {
         console.log(`Removed legacy TLive hook entries from: ${settingsPath}`);
     } else {
       console.log('Usage:');
-      console.log('  tlive install skills [--codex]  Install /tlive skill');
+      console.log('  tlive install skills  Install /tlive skill');
     }
     break;
   }
