@@ -1,14 +1,15 @@
 ---
 name: tlive
 description: |
-  IM bridge for Claude Code — chat from Telegram, Feishu, or QQ Bot.
-  Approve permissions, get streaming responses, manage sessions from your phone.
-  Use for: starting IM bridge, configuring IM platforms, checking status,
-  diagnosing issues.
-  Trigger phrases: "tlive", "IM bridge", "消息桥接", "手机交互", "启动桥接",
-  "连接飞书", "连接Telegram", "连接QQ", "诊断", "查看日志", "配置".
-  Do NOT use for: building bots, webhook integrations, or general coding tasks.
-argument-hint: "setup | start | stop | restart | status | logs [N] | reconfigure | doctor"
+  Feishu/Lark bridge for Claude Code.
+  Use for: configuring Feishu credentials, checking bridge status, pushing the
+  current Claude Code session to Feishu, reading logs, and diagnosing
+  Feishu/Claude Code bridge issues.
+  Trigger phrases: "tlive", "Feishu bridge", "飞书桥接", "手机继续",
+  "推送到手机", "连接飞书", "诊断", "查看日志", "配置".
+  Do NOT use for: opening a new Claude conversation, starting a new chat session,
+  building unrelated bots, generic webhook integrations, or non-tlive coding tasks.
+argument-hint: "setup | status | logs [N] | reconfigure | doctor | push"
 allowed-tools:
   - Bash
   - Read
@@ -19,196 +20,161 @@ allowed-tools:
   - Glob
 ---
 
-# TLive — IM Bridge Skill
+# TLive — Feishu Bridge Skill
 
-You are managing the TLive IM Bridge — bidirectional chat with Claude Code from Telegram, Feishu, or QQ Bot.
+You are managing TLive: a local Feishu/Lark bridge that lets the user control
+Claude Code from Feishu.
 
-The Bridge uses the Claude Agent SDK to interact with Claude Code. It is a pure TypeScript IM bridge with no separate Go Core runtime.
-
-User data: `~/.tlive/`
+TLive has one supported channel and one runtime:
+- Channel: Feishu/Lark
+- Runtime/provider: Claude Code through the Claude Agent SDK
+- User data: `~/.tlive/`
+- Config file: `~/.tlive/config.env`
 
 ## Command Parsing
 
-| User says (examples) | Subcommand |
+| User says | Subcommand |
 |---|---|
-| (no args), `start`, `启动`, `启动桥接` | start |
-| `setup`, `configure`, `配置`, `帮我连接 Telegram` | setup |
-| `stop`, `停止`, `关闭` | stop |
-| `restart`, `重启` | restart |
+| no args, `help`, `帮助`, `怎么用` | help |
+| `setup`, `configure`, `配置`, `连接飞书` | setup |
 | `status`, `状态`, `运行状态` | status |
 | `logs`, `logs 200`, `查看日志` | logs |
-| `reconfigure`, `修改配置`, `换个 bot`, `改 token` | reconfigure |
+| `reconfigure`, `修改配置`, `换 app`, `改密钥` | reconfigure |
 | `doctor`, `diagnose`, `诊断`, `挂了`, `没反应了` | doctor |
 | `push`, `推送`, `推送到手机`, `切换到手机` | push |
-| `help`, `帮助`, `怎么用` | help |
 
-**Disambiguation: `status` vs `doctor`** — Use `status` when the user just wants to check if the bridge is running. Use `doctor` when the user reports a problem or suspects something is broken. When in doubt and the user describes a symptom (e.g., "没反应了", "挂了"), prefer `doctor`.
+Use `status` when the user only wants to know whether the bridge is running.
+Use `doctor` when the user reports a symptom or asks what is broken.
 
-## Config Check (all commands except `setup`)
+## Config Check
 
-Before any command except `setup`, check `~/.tlive/config.env`:
-- **Missing** → auto-start `setup` wizard
-- **Exists** → proceed
+Before every command except `setup`, check whether `~/.tlive/config.env` exists.
+If it is missing, run the `setup` flow first.
 
 ## Subcommands
 
-### `/tlive` (no args) or `start` — Start Bridge
+### setup
 
-```
-1. Check config.env → if missing, auto-start setup
-2. Start Bridge: tlive start
-3. Wait 2s, verify alive: tlive status
-4. Report enabled channels
-```
+Collect one field at a time. Mask secrets when showing summaries.
 
-### `setup`
+Before asking for credentials, read `references/setup-guides.md` internally.
+Only show the specific next step the user needs unless they ask for the full guide.
 
-Interactive wizard. Collect **one field at a time**, confirm each (mask secrets to last 4 chars).
+Collect:
+- `TL_FS_APP_ID`
+- `TL_FS_APP_SECRET`
+- `TL_FS_ALLOWED_USERS` (optional)
+- `TL_PORT` (default `8080`)
+- `TL_TOKEN` (generate a 32-character hex token if missing)
+- `TL_PUBLIC_URL` (optional)
 
-Before asking for platform credentials, read `references/setup-guides.md` internally. Only mention the specific next step the user needs — don't dump the full guide. Show the relevant guide section only if the user asks for help.
+Then:
+1. Read `references/config.env.example` and use its exact variable names.
+2. Show a concise summary with secrets masked.
+3. Ask for confirmation before writing.
+4. Create `~/.tlive/{data,logs,runtime}`.
+5. Write `~/.tlive/config.env` and set mode `600`.
+6. Validate Feishu credentials using `references/token-validation.md`.
+7. On success, tell the user configuration is ready and run `tlive status`.
 
-**Step 1 — Choose IM platforms:**
-```
-AskUserQuestion: "Which IM platforms to enable?
-1. Telegram — streaming preview, inline permission buttons
-2. Feishu (飞书) — streaming cards, tool progress
-3. QQ Bot — for QQ users, interactive buttons
-Enter numbers (e.g., 1,3):"
-```
+### reconfigure
 
-**Step 2 — Collect credentials per platform:**
+1. Read `~/.tlive/config.env`.
+2. Show current values with secrets masked.
+3. Ask which Feishu/general fields to change.
+4. Update only those fields.
+5. Re-validate changed Feishu credentials.
+6. Tell the user changes apply to new conversations.
 
-- **Telegram**: Bot Token → confirm (masked) → Chat ID (optional) → Allowed User IDs (optional). **Important:** At least one of Chat ID or Allowed User IDs should be set.
-- **Feishu**: App ID → confirm → App Secret → confirm (masked) → Allowed User IDs (optional).
-- **QQ Bot**: App ID → confirm → Client Secret → confirm (masked) → Allowed Users (optional).
+### status
 
-**Step 3 — General settings:**
-- Port (default 8080)
-- Auto-generate TL_TOKEN (32-char hex)
+Run:
 
-**Step 4 — Write config and validate:**
-1. Read `references/config.env.example` as the template — use its exact variable names (e.g., `TL_TG_*` for Telegram, `TL_FS_*` for Feishu, `TL_QQ_*` for QQ Bot). Do NOT invent variable names.
-2. Show a summary table (secrets masked to last 4 chars)
-3. Ask user to confirm before writing
-4. `mkdir -p ~/.tlive/{data,logs,runtime}`
-5. Write `~/.tlive/config.env` using the template's variable names, then `chmod 600`
-6. Validate tokens — read `references/token-validation.md` for exact commands per platform
-7. Report results. If validation fails, explain what's wrong.
-8. On success: "Setup complete! I'll start the Bridge now." Then auto-start.
-
-### `reconfigure`
-
-1. Read current config from `~/.tlive/config.env`
-2. Show current settings in a table (secrets masked to last 4 chars only)
-3. Ask what the user wants to change
-4. Collect new values one at a time, show where to find each value (show full guide from `references/setup-guides.md` only if asked)
-5. Update config file
-6. Re-validate any changed tokens
-7. Note: "Changes apply to new conversations. No restart needed."
-
-### `stop`
-
-```
-tlive stop
-```
-
-### `restart`
-
-```
-1. Check config.env → if missing, auto-start setup
-2. Stop Bridge: tlive stop
-3. Start Bridge: tlive start
-4. Wait 2s, verify alive: tlive status
-5. Report enabled channels
-```
-
-### `status`
-
-```
+```bash
 tlive status
 ```
 
-### `logs`
+### logs
 
-Extract optional line count N from arguments (default 50).
-```
+Extract an optional line count. Default to 50.
+
+```bash
 tlive logs [N]
 ```
 
-### `push`
+### push
 
-Push current session to mobile IM for continuing on phone.
+Push the current Claude Code session to Feishu so the user can continue from
+their phone.
 
+1. Get the current working directory.
+2. Build a short project/session preview from the current context.
+3. Read `TL_WEBHOOK_TOKEN` from `~/.tlive/config.env`.
+4. Call the local push API:
+
+```bash
+curl -s -X POST http://localhost:8081/api/push \
+  -H "Authorization: Bearer <TL_WEBHOOK_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"workdir":"<cwd>","projectName":"<project>","preview":"<summary>"}'
 ```
-1. Get current workdir: basename $(git rev-parse --show-toplevel 2>/dev/null || pwd)
-2. Get project name from git repo or directory name
-3. Generate preview: summarize last 2-3 exchanges in 1-2 sentences (what you're working on)
-4. Read TL_WEBHOOK_TOKEN from ~/.tlive/config.env
-5. Call API: curl -s -X POST http://localhost:8081/api/push \
-   -H "Authorization: Bearer <TL_WEBHOOK_TOKEN>" \
-   -H "Content-Type: application/json" \
-   -d '{"workdir":"<cwd>","projectName":"<project>","preview":"<summary>"}'
-6. Report result:
-   - Success: "Session pushed! Check your phone to continue."
-   - Connection error: "Bridge not running. Run: tlive start"
-```
 
-### `doctor`
+If the request fails because the bridge is not reachable, report that the bridge
+is not reachable and show `tlive status` as the next diagnostic command.
 
-Run diagnostics and suggest fixes. For complex issues, read `references/troubleshooting.md`.
+### doctor
 
-```
+Run:
+
+```bash
 tlive doctor
 ```
 
-Then validate IM tokens if configured — read `references/token-validation.md` for commands.
+For complex issues, read `references/troubleshooting.md` and then suggest the
+smallest concrete fix.
 
-### `help`
+### help
 
-Show a clear overview of the TLive system and available commands:
+Show the useful commands:
 
-```
-TLive — Control Claude Code from your phone
+```text
+TLive — Control Claude Code from Feishu
 
-In Claude Code (/tlive):
-  /tlive               Start IM Bridge (chat from phone)
-  /tlive setup         Configure IM platforms (AI-guided)
-  /tlive push          Push session to mobile (continue on phone)
-  /tlive reconfigure   Modify specific config fields
-  /tlive stop          Stop Bridge
-  /tlive status        Show Bridge status
-  /tlive logs [N]      Show last N log lines
-  /tlive doctor        Diagnose issues + suggest fixes
+In Claude Code:
+  /tlive               Show this help
+  /tlive setup         Configure Feishu credentials
+  /tlive push          Push current session to Feishu
+  /tlive reconfigure   Modify config
+  /tlive status        Show status
+  /tlive logs [N]      Show logs
+  /tlive doctor        Diagnose issues
 
-In terminal (tlive):
-  tlive start          Start Bridge daemon
-  tlive stop           Stop daemon
-  tlive status         Check status
+In terminal:
+  tlive status
+  tlive logs [N]
+  tlive doctor
 
-In IM (from phone):
-  /new                       Start new conversation
-  /sessions                  List sessions in current directory
-  /sessions --all            List all sessions
-  /session <n>               Switch to session #n
-  /cd <path>                 Change working directory
-  /pwd                       Show current directory
-  /bash <cmd>                Execute shell command
-  /settings user|full|isolated  Claude settings scope
-  /perm on|off               Permission prompts on/off
-  /stop                      Interrupt execution
-  /hooks pause|resume        Toggle hook approval
-  /status                    Check status
-  /upgrade                   Check for updates
-  /upgrade skip              Skip current update notification
-  /restart                   Restart bridge service
-  /help                      Show all commands
-
-Settings hot-reload: Changes apply to new conversations. No restart needed.
+In Feishu:
+  /new
+  /sessions
+  /sessions --all
+  /session <n>
+  /cd <path>
+  /pwd
+  /bash <cmd>
+  /settings user|full|isolated
+  /perm on|off
+  /stop
+  /hooks pause|resume
+  /status
+  /upgrade
+  /restart
+  /help
 ```
 
 ## Notes
 
-- Always mask secrets in output (show only last 4 characters)
-- Always check for config.env before starting — without it the daemon crashes and leaves a stale PID file
-- Config at `~/.tlive/config.env`
-- Settings hot-reload: config changes apply to new conversations, no restart needed
+- Always mask secrets in output.
+- Do not mention unsupported channels or provider/runtime choices.
+- If `config.env` is missing, setup comes before other skill commands.
+- Config changes are read for new conversations.
