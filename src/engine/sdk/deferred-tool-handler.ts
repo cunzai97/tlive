@@ -10,12 +10,9 @@ import type { InteractionState } from '../state/interaction-state.js';
 import { truncate } from '../../core/string.js';
 import { generateId } from '../../core/id.js';
 import { DEFAULT_PERMISSION_TIMEOUT_MS } from '../../core/timing.js';
-import { messageScopeId } from '../../core/key.js';
+import { conversationScopeId } from '../../channels/conversation-context.js';
 import { withInboundReplyContext } from '../../channels/reply-context.js';
-
-/** Known deferred tools that need interactive input */
-export const DEFERRED_TOOLS = ['EnterPlanMode', 'EnterWorktree'] as const;
-export type DeferredToolName = typeof DEFERRED_TOOLS[number];
+import { isDeferredToolName, type DeferredToolName } from '../../providers/deferred-tools.js';
 
 /** Configuration for each deferred tool's input requirements */
 const DEFERRED_TOOL_CONFIG: Record<DeferredToolName, {
@@ -25,13 +22,13 @@ const DEFERRED_TOOL_CONFIG: Record<DeferredToolName, {
   defaultValue?: string;
 }> = {
   EnterPlanMode: {
-    prompt: 'Claude 想要进入 Plan 模式来规划任务。请输入你的计划内容，或直接确认进入计划模式。',
+    prompt: 'Agent 想要进入 Plan 模式来规划任务。请输入你的计划内容，或直接确认进入计划模式。',
     inputRequired: false,
     inputPlaceholder: '输入计划内容（可选）...',
     defaultValue: '',
   },
   EnterWorktree: {
-    prompt: 'Claude 想要创建一个新的 git worktree 来隔离工作。请输入分支名称（可选）。',
+    prompt: 'Agent 想要创建一个新的 git worktree 来隔离工作。请输入分支名称（可选）。',
     inputRequired: false,
     inputPlaceholder: '输入分支名称（可选）...',
     defaultValue: '',
@@ -56,7 +53,7 @@ export class SDKDeferredToolHandler {
 
   /** Check if a tool is a deferred tool that needs interactive input */
   static isDeferredTool(toolName: string): boolean {
-    return DEFERRED_TOOLS.includes(toolName as DeferredToolName);
+    return isDeferredToolName(toolName);
   }
 
   /** Get config for a deferred tool */
@@ -89,7 +86,7 @@ export class SDKDeferredToolHandler {
     };
 
     // Track pending deferred tool state (only in InteractionState, not PermissionCoordinator)
-    interactionState.beginDeferredTool(permId, toolName, messageScopeId(msg));
+    interactionState.beginDeferredTool(permId, toolName, conversationScopeId(msg));
 
     const abortCleanup = () => this.cleanup(permId, 'Cancelled');
 

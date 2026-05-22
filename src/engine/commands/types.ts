@@ -1,19 +1,20 @@
 import type { BaseChannelAdapter } from '../../channels/base.js';
 import type { InboundMessage } from '../../channels/types.js';
 import type { BridgeStore, ChannelBinding } from '../../store/interface.js';
-import type { QueryControls } from '../../providers/base.js';
-import type { ClaudeSDKProvider } from '../../providers/claude-sdk.js';
+import type { AgentProvider, QueryControls } from '../../providers/base.js';
+import type { AgentProviderRegistry } from '../../providers/registry.js';
 import type { SessionStateManager } from '../state/session-state.js';
 import type { WorkspaceStateManager } from '../state/workspace-state.js';
 import type { RecentProjectsManager } from '../state/recent-projects.js';
 import type { ChannelRouter } from '../../utils/router.js';
 import type { SDKEngine, SessionCleanupReason } from '../sdk/engine.js';
 import type { PermissionCoordinator } from '../coordinators/permission.js';
-import type { ClaudeSettingSource, ProjectsValidationResult } from '../../config.js';
+import type { AgentSettingSource, ProjectsValidationResult } from '../../config.js';
 import type { HelpCommandEntry, HomeData } from '../../formatting/message-types.js';
 import type { Locale } from '../../i18n/index.js';
 import type { HelpCategoryId } from './help-categories.js';
 import type { TopicSessionManager } from '../state/topic-sessions.js';
+import type { ConversationSurface } from '../conversations/surface-policy.js';
 
 /** Router helpers - encapsulates complex internal operations */
 export interface RouterHelpers {
@@ -34,11 +35,11 @@ export interface RouterHelpers {
   /** Update workspace binding from path (find git root) */
   updateWorkspaceBindingFromPath(channelType: string, chatId: string, cwd: string): void;
   /** Get settings preset name from sources */
-  getSettingsPreset(sources: ClaudeSettingSource[]): string;
+  getSettingsPreset(sources: AgentSettingSource[]): string;
   /** Cached projects config */
   projectsConfig: ProjectsValidationResult | null;
-  /** Default Claude setting sources */
-  defaultClaudeSettingSources: ClaudeSettingSource[];
+  /** Default provider setting sources */
+  defaultAgentSettingSources: AgentSettingSource[];
 }
 
 /** Stable service dependencies shared across all commands */
@@ -50,10 +51,11 @@ export interface CommandServices {
   recentProjects: RecentProjectsManager;
   permissions: PermissionCoordinator;
   sdkEngine?: SDKEngine;
-  llm: ClaudeSDKProvider;
+  llm: AgentProvider;
+  providers: AgentProviderRegistry;
   activeControls: Map<string, QueryControls>;
   defaultWorkdir: string;
-  defaultClaudeSettingSources: ClaudeSettingSource[];
+  defaultAgentSettingSources: AgentSettingSource[];
   getAdapters: () => Map<string, BaseChannelAdapter>;
   topicSessions?: TopicSessionManager;
 }
@@ -64,6 +66,8 @@ export interface CommandContext {
   msg: InboundMessage;
   /** Logical state/session scope. For Feishu topics this is chat_id + thread_id. */
   scopeId: string;
+  /** Product surface for command rules: main-chat workbench or topic conversation. */
+  surface: ConversationSurface;
   parts: string[];
   services: CommandServices;
   /** Router helpers for complex operations */

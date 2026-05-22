@@ -49,6 +49,8 @@ export const zh: Translations = {
   'perm.pendingApproval': '当前待审批',
   'perm.lastDecision': '最近处理',
   'perm.decisionAllow': '允许一次',
+  'perm.decisionAllowSameCommand': '允许相同命令',
+  'perm.decisionAllowSessionAll': '本 session 全部允许',
   'perm.decisionAlwaysAllow': '本会话始终允许',
   'perm.decisionDeny': '拒绝',
   'perm.decisionCancelled': '已取消',
@@ -234,10 +236,6 @@ export const zh: Translations = {
   'input.deny': '拒绝',
   'input.skipped': '⏭ 已跳过',
   'input.submitted': '✅ 已提交输入:',
-  'input.hookDenied': '❌ 已拒绝',
-  'input.hookAlwaysAllowed': '📌 已设置始终允许',
-  'input.hookAllowed': '✅ 已允许',
-  'input.hookFailed': '❌ 处理失败:',
 
   // --- recent projects ---
   'recentProjects.hint': '💡 使用 /cd <路径> 切换目录',
@@ -255,7 +253,7 @@ export const zh: Translations = {
   'doctor.config': '配置文件',
   'doctor.configFound': '已配置',
   'doctor.configMissing': '未找到',
-  'doctor.claudeCli': 'Claude CLI',
+  'doctor.providers': '执行引擎',
   'doctor.notFound': '未安装',
   'doctor.channels': '通道状态',
   'doctor.connected': '已连接',

@@ -3,8 +3,6 @@
 [![CI](https://github.com/huanghuoguoguo/tlive/actions/workflows/ci.yml/badge.svg)](https://github.com/huanghuoguoguo/tlive/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-[中文文档](README_CN.md)
-
 **Control Claude Code from Feishu/Lark** — send tasks from your phone, watch progress in real time, and approve Claude Code permissions remotely.
 
 ## Scope
@@ -25,7 +23,7 @@ The project no longer carries Telegram, QQ Bot, Codex, or generic provider/chann
 - AskUserQuestion and deferred tool interactions in Feishu cards
 - Claude Code session scanning and resume from `~/.claude/projects/`
 - Per-chat working directory with `/cd`, `/pwd`, `/new`, and `/sessions`
-- Automation webhook hooks for external prompt injection
+- Automation webhooks for external prompt injection
 
 ## Install
 
@@ -97,7 +95,7 @@ Common commands:
 
 ## Settings
 
-Claude Code settings are loaded per conversation from the session working directory:
+Agent settings are loaded per conversation from the session working directory:
 
 | Priority | Source | Path |
 |----------|--------|------|
@@ -108,8 +106,10 @@ Claude Code settings are loaded per conversation from the session working direct
 Configure with:
 
 ```env
-TL_CLAUDE_SETTINGS=user,project,local
+TL_AGENT_SETTINGS=user,project,local
 ```
+
+Existing `TL_CLAUDE_SETTINGS` configs are still accepted as an alias.
 
 ## Documentation
 

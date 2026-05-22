@@ -22,7 +22,7 @@ export class RebindCommand extends BaseCommand {
     }
 
     const sessions = ctx.services.sdkEngine?.getSessionsForChat(ctx.msg.channelType, scopeId) ?? [];
-    const target = sessions.find(s => s.bindingSessionId === targetBindingId);
+    const target = sessions.find((s) => s.bindingSessionId === targetBindingId);
     if (!target) {
       await this.send(ctx, { chatId: ctx.msg.chatId, text: '⚠️ 未找到该会话，可能已过期。' });
       return true;
@@ -38,20 +38,24 @@ export class RebindCommand extends BaseCommand {
 
     await ctx.services.router.rebind(ctx.msg.channelType, scopeId, targetBindingId, {
       sdkSessionId: target.sdkSessionId,
+      provider: target.provider ?? binding?.provider ?? ctx.services.providers.defaultProviderKind,
       cwd: target.workdir,
-      claudeSettingSources: binding?.claudeSettingSources,
+      agentSettingSources: binding?.agentSettingSources,
       projectName: binding?.projectName,
     });
     ctx.services.workspace.pushHistory(ctx.msg.channelType, scopeId, target.workdir);
     ctx.helpers.updateWorkspaceBindingFromPath(ctx.msg.channelType, scopeId, target.workdir);
 
     const sdkShort = target.sdkSessionId?.slice(0, 8) ?? '-';
-    await this.send(ctx, presentSessionSwitched(
-      ctx.msg.chatId,
-      0, // no index for rebind
-      shortPath(target.workdir),
-      `SDK: ${sdkShort}`,
-    ));
+    await this.send(
+      ctx,
+      presentSessionSwitched(
+        ctx.msg.chatId,
+        0, // no index for rebind
+        shortPath(target.workdir),
+        `SDK: ${sdkShort}`,
+      ),
+    );
     return true;
   }
 }

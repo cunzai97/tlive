@@ -50,14 +50,6 @@ export function presentStopResult(chatId: string, interrupted: boolean): { chatI
   return { chatId, text: interrupted ? '⏹ Interrupted current execution' : '⚠️ No active execution to stop' };
 }
 
-export function presentHooksStatus(chatId: string, paused: boolean): { chatId: string; text: string } {
-  return { chatId, text: `Hooks: ${paused ? '⏸ paused' : '▶ active'}` };
-}
-
-export function presentHooksChanged(chatId: string, paused: boolean): { chatId: string; text: string } {
-  return { chatId, text: paused ? '⏸ Hooks paused — auto-allow, no notifications.' : '▶ Hooks resumed — forwarding to IM.' };
-}
-
 export function presentNoSessions(chatId: string, hint: string): { chatId: string; text: string } {
   return { chatId, text: `No sessions found${hint}` };
 }
@@ -111,7 +103,7 @@ export function presentDirectoryNotFound(chatId: string, path: string): { chatId
 }
 
 export function presentSettingsUnavailable(chatId: string): { chatId: string; text: string } {
-  return { chatId, text: '⚠️ Settings only available for Claude provider' };
+  return { chatId, text: '⚠️ 当前执行引擎不支持设置源切换' };
 }
 
 export function presentSettingsChanged(chatId: string, label: string): { chatId: string; text: string } {
@@ -126,7 +118,7 @@ export function presentSettingsStatus(
 ): { chatId: string; text: string } {
   return {
     chatId,
-    text: `⚙️ Settings (${scope}): **${preset}** (${current.join(', ') || 'none'})\nUsage: \`/settings user|full|isolated\`\n  user — ~/.claude/settings.json (auth, model)\n  full — + CLAUDE.md, MCP servers, skills\n  isolated — no external settings`,
+    text: `⚙️ Settings (${scope}): **${preset}** (${current.join(', ') || 'none'})\nUsage: \`/settings user|full|isolated\`\n  user — user-level settings\n  full — user + project + local settings\n  isolated — no external settings`,
   };
 }
 
