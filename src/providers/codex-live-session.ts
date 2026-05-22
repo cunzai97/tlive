@@ -13,6 +13,7 @@ import type { CanonicalEvent } from '../canonical/schema.js';
 import type {
   CreateSessionParams,
   FileAttachment,
+  AgentRuntimeInfo,
   LiveSession,
   MessagePriority,
   QueryControls,
@@ -20,6 +21,9 @@ import type {
   TurnParams,
 } from './base.js';
 import { preparePromptWithImages } from './prompt-media.js';
+import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 
 export interface CodexRuntimeOptions {
   codexPath?: string;
@@ -34,30 +38,45 @@ export interface CodexRuntimeOptions {
 
 export type CodexSessionOptions = CreateSessionParams & CodexRuntimeOptions;
 
+interface CodexTurnContext {
+  readonly token: symbol;
+  readonly abortController: AbortController;
+  readonly adapter: CodexAdapter;
+  controller: ReadableStreamDefaultController<CanonicalEvent> | null;
+  closed: boolean;
+}
+
 export class CodexLiveSession implements LiveSession {
   readonly capabilities = { nativeSteer: false, nativeQueue: false };
+  readonly runtimeInfo: AgentRuntimeInfo;
 
   private readonly codex: Codex;
   private readonly thread: Thread;
-  private readonly adapter: CodexAdapter;
-  private currentAbortController: AbortController | null = null;
-  private currentTurnController: ReadableStreamDefaultController<CanonicalEvent> | null = null;
+  private activeTurn: CodexTurnContext | null = null;
+  private sessionId: string | undefined;
   private lifecycleCallbacks: { onTurnComplete?: () => void } = {};
   private _isAlive = true;
   private _isTurnActive = false;
+  private readonly options: CodexSessionOptions;
 
-  constructor(private readonly options: CodexSessionOptions) {
+  constructor(options: CodexSessionOptions) {
+    this.options = resolveCodexSessionOptions(options);
     this.codex = new Codex({
-      ...(options.codexPath ? { codexPathOverride: options.codexPath } : {}),
+      ...(this.options.codexPath ? { codexPathOverride: this.options.codexPath } : {}),
     });
-    const threadOptions = this.buildThreadOptions(options);
-    this.thread = options.sessionId
-      ? this.codex.resumeThread(options.sessionId, threadOptions)
+    const threadOptions = this.buildThreadOptions(this.options);
+    this.runtimeInfo = {
+      provider: 'codex',
+      displayName: 'Codex',
+      ...(threadOptions.model ? { model: threadOptions.model } : {}),
+      ...(threadOptions.modelReasoningEffort
+        ? { reasoningEffort: threadOptions.modelReasoningEffort }
+        : {}),
+    };
+    this.thread = this.options.sessionId
+      ? this.codex.resumeThread(this.options.sessionId, threadOptions)
       : this.codex.startThread(threadOptions);
-    this.adapter = new CodexAdapter({
-      sessionId: options.sessionId,
-      model: threadOptions.model,
-    });
+    this.sessionId = this.options.sessionId;
   }
 
   get isAlive(): boolean {
@@ -72,30 +91,32 @@ export class CodexLiveSession implements LiveSession {
 
   startTurn(prompt: string, params?: TurnParams): StreamChatResult {
     if (!this._isAlive) throw new Error('Session is closed');
-    if (this._isTurnActive) {
-      this.currentAbortController?.abort();
-      this.closeCurrentTurn();
+    if (this.activeTurn) {
+      this.activeTurn.abortController.abort();
+      this.closeTurnContext(this.activeTurn);
+      this.deactivateTurn(this.activeTurn);
     }
 
-    const abortController = new AbortController();
-    this.currentAbortController = abortController;
+    const context = this.createTurnContext();
     const input = this.buildInput(prompt, params?.attachments);
 
     const controls: QueryControls = {
       interrupt: async () => {
-        abortController.abort();
+        context.abortController.abort();
       },
       stopTask: async () => {},
     };
 
     const stream = new ReadableStream<CanonicalEvent>({
       start: (controller) => {
-        this.currentTurnController = controller;
+        context.controller = controller;
+        this.activeTurn = context;
         this._isTurnActive = true;
-        void this.consumeTurn(input, abortController);
+        void this.consumeTurn(input, context);
       },
       cancel: () => {
-        abortController.abort();
+        context.abortController.abort();
+        context.closed = true;
       },
     });
 
@@ -111,45 +132,87 @@ export class CodexLiveSession implements LiveSession {
   }
 
   async interruptTurn(): Promise<void> {
-    this.currentAbortController?.abort();
+    this.activeTurn?.abortController.abort();
   }
 
   close(): void {
     this._isAlive = false;
-    this.currentAbortController?.abort();
-    this.closeCurrentTurn();
+    if (!this.activeTurn) return;
+    this.activeTurn.abortController.abort();
+    this.closeTurnContext(this.activeTurn);
+    this.deactivateTurn(this.activeTurn);
   }
 
-  private async consumeTurn(input: Input, abortController: AbortController): Promise<void> {
+  private async consumeTurn(input: Input, context: CodexTurnContext): Promise<void> {
     try {
       const { events } = await this.thread.runStreamed(input, {
-        signal: abortController.signal,
+        signal: context.abortController.signal,
       });
       for await (const event of events) {
-        for (const mapped of this.adapter.mapEvent(event)) {
-          this.currentTurnController?.enqueue(mapped);
+        for (const mapped of context.adapter.mapEvent(event)) {
+          this.enqueueTurnEvent(context, mapped);
         }
+        this.rememberActiveSessionId(context);
       }
     } catch (err) {
-      for (const mapped of this.adapter.mapError(err, abortController.signal.aborted)) {
-        this.currentTurnController?.enqueue(mapped);
+      for (const mapped of context.adapter.mapError(err, context.abortController.signal.aborted)) {
+        this.enqueueTurnEvent(context, mapped);
       }
     } finally {
-      this.adapter.reset();
-      this.closeCurrentTurn();
-      this.lifecycleCallbacks.onTurnComplete?.();
+      this.finishTurnContext(context);
     }
   }
 
-  private closeCurrentTurn(): void {
-    this._isTurnActive = false;
-    this.currentAbortController = null;
+  private createTurnContext(): CodexTurnContext {
+    return {
+      token: Symbol('codex-turn'),
+      abortController: new AbortController(),
+      adapter: new CodexAdapter({
+        sessionId: this.thread.id ?? this.sessionId,
+        model: this.runtimeInfo.model,
+      }),
+      controller: null,
+      closed: false,
+    };
+  }
+
+  private enqueueTurnEvent(context: CodexTurnContext, event: CanonicalEvent): void {
+    if (context.closed) return;
     try {
-      this.currentTurnController?.close();
+      context.controller?.enqueue(event);
+    } catch {
+      context.closed = true;
+    }
+  }
+
+  private finishTurnContext(context: CodexTurnContext): void {
+    this.closeTurnContext(context);
+    if (this.activeTurn?.token !== context.token) return;
+
+    this.rememberActiveSessionId(context);
+    this.deactivateTurn(context);
+    this.lifecycleCallbacks.onTurnComplete?.();
+  }
+
+  private closeTurnContext(context: CodexTurnContext): void {
+    context.closed = true;
+    try {
+      context.controller?.close();
     } catch {
       /* already closed */
     }
-    this.currentTurnController = null;
+    context.controller = null;
+  }
+
+  private deactivateTurn(context: CodexTurnContext): void {
+    if (this.activeTurn?.token !== context.token) return;
+    this.activeTurn = null;
+    this._isTurnActive = false;
+  }
+
+  private rememberActiveSessionId(context: CodexTurnContext): void {
+    if (this.activeTurn?.token !== context.token) return;
+    this.sessionId = context.adapter.sessionId ?? this.sessionId;
   }
 
   private buildInput(prompt: string, attachments?: FileAttachment[]): Input {
@@ -182,4 +245,55 @@ export class CodexLiveSession implements LiveSession {
       ...(options.webSearchMode ? { webSearchMode: options.webSearchMode } : {}),
     };
   }
+}
+
+export function resolveCodexSessionOptions(options: CodexSessionOptions): CodexSessionOptions {
+  const userDefaults = readCodexUserDefaults();
+  return {
+    ...options,
+    model: options.model ?? userDefaults.model,
+    modelReasoningEffort: options.modelReasoningEffort ?? userDefaults.modelReasoningEffort,
+  };
+}
+
+function readCodexUserDefaults(): Pick<CodexRuntimeOptions, 'model' | 'modelReasoningEffort'> {
+  const configPath = join(process.env.CODEX_HOME?.trim() || join(homedir(), '.codex'), 'config.toml');
+  if (!existsSync(configPath)) return {};
+
+  try {
+    const content = readFileSync(configPath, 'utf8');
+    const values = parseTopLevelTomlStrings(content);
+    const effort = normalizeCodexEffort(values.model_reasoning_effort);
+    return {
+      ...(values.model ? { model: values.model } : {}),
+      ...(effort ? { modelReasoningEffort: effort } : {}),
+    };
+  } catch {
+    return {};
+  }
+}
+
+function parseTopLevelTomlStrings(content: string): Record<string, string> {
+  const values: Record<string, string> = {};
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    if (line.startsWith('[')) break;
+    const match = /^([A-Za-z0-9_-]+)\s*=\s*(.+?)\s*(?:#.*)?$/.exec(line);
+    if (!match) continue;
+    const [, key, rawValue] = match;
+    const quoted = /^"((?:\\"|[^"])*)"$/.exec(rawValue);
+    values[key] = quoted ? quoted[1].replace(/\\"/g, '"') : rawValue.trim();
+  }
+  return values;
+}
+
+function normalizeCodexEffort(value: string | undefined): ModelReasoningEffort | undefined {
+  return value === 'minimal' ||
+    value === 'low' ||
+    value === 'medium' ||
+    value === 'high' ||
+    value === 'xhigh'
+    ? value
+    : undefined;
 }

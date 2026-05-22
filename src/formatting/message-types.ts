@@ -5,6 +5,14 @@
 
 import type { Button } from '../ui/types.js';
 import type { AgentProviderKind } from '../providers/kinds.js';
+import type { ActionCallbackRoute } from '../core/callbacks.js';
+import type { AgentProviderRuntimeMode } from '../providers/types.js';
+
+export interface ChannelInfo {
+  type: string;
+  name?: string;
+  appId?: string;
+}
 
 /** Session snapshot for /status detail */
 export interface SessionSnapshot {
@@ -20,7 +28,7 @@ export interface StatusData {
   healthy: boolean;
   channels: string[];
   /** Bot info per channel (name or ID) */
-  channelInfo?: Array<{ type: string; name?: string; id?: string }>;
+  channelInfo?: ChannelInfo[];
   cwd?: string;
   sessionId?: string;
   /** Active SDK sessions */
@@ -37,15 +45,6 @@ export interface StatusData {
   version?: string;
 }
 
-/** Permission request card */
-export interface PermissionData {
-  toolName: string;
-  toolInput: string;
-  permissionId: string;
-  expiresInMinutes?: number;
-  terminalUrl?: string;
-}
-
 /** AskUserQuestion card */
 export interface QuestionData {
   question: string;
@@ -54,16 +53,6 @@ export interface QuestionData {
   multiSelect: boolean;
   permId: string;
   sessionId: string;
-}
-
-/** Runtime notification card. */
-export interface NotificationData {
-  type: 'stop' | 'idle_prompt' | 'generic';
-  title: string;
-  summary?: string;
-  terminalUrl?: string;
-  sessionId?: string;
-  cwd?: string;
 }
 
 /** Scanned session entry for home display */
@@ -103,6 +92,28 @@ export interface HomeTopicEntry {
   updatedAt: string;
   isCurrent: boolean;
   isActive: boolean;
+}
+
+export interface SessionListEntry {
+  index: number;
+  provider?: AgentProviderKind;
+  providerDisplayName?: string;
+  sdkSessionId?: string;
+  date: string;
+  cwd: string;
+  title?: string;
+  preview: string;
+  transcript?: Array<{ role: string; text: string }>;
+  isCurrent?: boolean;
+  isActive?: boolean;
+  actionLabel: string;
+  actionStyle?: Button['style'];
+}
+
+export interface SessionListData {
+  title: string;
+  emptyText: string;
+  entries: SessionListEntry[];
 }
 
 export interface HomeProviderEntry {
@@ -157,7 +168,7 @@ export interface HomeData {
     /** Active channels */
     channels?: string[];
     /** Channel info (appId, name) for each active channel */
-    channelInfo?: Array<{ type: string; appId?: string; name?: string }>;
+    channelInfo?: ChannelInfo[];
     /** Queue info for active session */
     queueInfo?: { depth: number; max: number };
   };
@@ -180,6 +191,7 @@ export interface HomeData {
 /** Permission status card for /perm command */
 export interface PermissionStatusData {
   mode: 'on' | 'off';
+  route?: ActionCallbackRoute;
   rememberedTools: number;
   rememberedBashPrefixes: number;
   pending?: {
@@ -200,39 +212,6 @@ export interface TaskStartData {
   previousSessionPreview?: string;
   /** Reason for new session: 'idle' (auto-reset after inactivity), 'manual' (/new command), 'stale' (resume failed) */
   reason?: 'idle' | 'manual' | 'stale';
-}
-
-/** Session list for /session command */
-export interface SessionsData {
-  /** Current workspace binding for this chat */
-  workspaceBinding?: string;
-  sessions: Array<{
-    index: number;
-    provider?: AgentProviderKind;
-    providerDisplayName?: string;
-    date: string;
-    cwd: string;
-    size: string;
-    preview: string;
-    isCurrent: boolean;
-    /** Whether this session is stale (inactive for too long) */
-    isStale?: boolean;
-  }>;
-  filterHint: string;
-  /** Whether this is showing all sessions (global) or current workspace only */
-  showAll?: boolean;
-}
-
-/** Session detail for /sessioninfo command */
-export interface SessionDetailData {
-  index: number;
-  provider?: AgentProviderKind;
-  providerDisplayName?: string;
-  cwd: string;
-  preview: string;
-  date: string;
-  size: string;
-  transcript: Array<{ role: string; text: string }>;
 }
 
 /** Help category display metadata. */
@@ -257,6 +236,30 @@ export interface HelpCommandEntry {
 export interface HelpData {
   commands: HelpCommandEntry[];
   actionButtons?: Button[];
+}
+
+/** Provider-aware command palette shown when a user sends "/" inside a topic. */
+export interface TopicCommandPaletteData {
+  provider: AgentProviderKind;
+  providerDisplayName: string;
+  cwd: string;
+  sdkSessionId?: string;
+  isActive: boolean;
+  permissionMode: 'on' | 'off';
+  route?: {
+    scopeId?: string;
+    threadId?: string;
+    replyTargetMessageId?: string;
+    replyInThread?: boolean;
+  };
+  capabilities: {
+    runtimeMode: AgentProviderRuntimeMode;
+    nativeSteer: boolean;
+    nativeQueue: boolean;
+    interactivePermissions: boolean;
+    sessionResume: boolean;
+    imageInputs: boolean;
+  };
 }
 
 /** New session confirmation */
@@ -313,6 +316,8 @@ export interface ProgressData {
   };
   /** AI-generated summary of preceding tool calls */
   toolUseSummaryText?: string;
+  /** Formatted usage/cost summary shown in run info. */
+  usageSummary?: string;
   /** API retry state */
   apiRetry?: {
     attempt: number;
@@ -366,25 +371,16 @@ export interface MultiSelectToggleData {
   sessionId: string;
 }
 
-/** Queue status for /queue command */
-export interface QueueStatusData {
-  sessionKey: string;
-  depth: number;
-  maxDepth: number;
-  /** Preview of queued messages (if available) */
-  queuedMessages?: Array<{ preview: string; timestamp: number }>;
-  /** Estimated wait time in seconds (if calculable) */
-  estimatedWaitSeconds?: number;
-  /** Age of the oldest queued message in seconds */
-  oldestQueuedAgeSeconds?: number;
-  /** Queue pressure ratio: depth/maxDepth (0-1+) */
-  saturationRatio?: number;
-}
-
 /** Diagnose system status for /diagnose command */
 export interface DiagnoseData {
   activeSessions: number;
   totalBubbleMappings: number;
+  /** Persisted channel bindings on disk */
+  persistedBindings?: number;
+  /** Persisted topic sessions across all chats */
+  persistedTopicSessions?: number;
+  /** Persisted topic sessions for the current platform chat */
+  persistedTopicSessionsInChat?: number;
   /** Queue statistics per session */
   queueStats: Array<{ sessionKey: string; depth: number; maxDepth: number }>;
   /** Total queued messages across all sessions */
@@ -423,15 +419,13 @@ export interface DeferredToolInputData {
 /** Union type of all formattable messages */
 export type FormattableMessage =
   | { type: 'status'; chatId: string; data: StatusData }
-  | { type: 'permission'; chatId: string; data: PermissionData }
   | { type: 'question'; chatId: string; data: QuestionData }
-  | { type: 'notification'; chatId: string; data: NotificationData }
   | { type: 'home'; chatId: string; data: HomeData }
   | { type: 'permissionStatus'; chatId: string; data: PermissionStatusData }
   | { type: 'taskStart'; chatId: string; data: TaskStartData }
-  | { type: 'sessions'; chatId: string; data: SessionsData }
-  | { type: 'sessionDetail'; chatId: string; data: SessionDetailData }
   | { type: 'help'; chatId: string; data: HelpData }
+  | { type: 'sessionList'; chatId: string; data: SessionListData }
+  | { type: 'topicCommandPalette'; chatId: string; data: TopicCommandPaletteData }
   | { type: 'newSession'; chatId: string; data: NewSessionData }
   | { type: 'error'; chatId: string; data: ErrorData }
   | { type: 'progress'; chatId: string; data: ProgressData }
@@ -439,6 +433,5 @@ export type FormattableMessage =
   | { type: 'cardResolution'; chatId: string; data: CardResolutionData }
   | { type: 'versionUpdate'; chatId: string; data: VersionUpdateData }
   | { type: 'multiSelectToggle'; chatId: string; data: MultiSelectToggleData }
-  | { type: 'queueStatus'; chatId: string; data: QueueStatusData }
   | { type: 'diagnose'; chatId: string; data: DiagnoseData }
   | { type: 'deferredToolInput'; chatId: string; data: DeferredToolInputData };

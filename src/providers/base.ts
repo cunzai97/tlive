@@ -9,6 +9,7 @@ import type {
   PermissionRequestHandler,
   PermissionTimeoutCallback,
   QueryControls,
+  AgentProviderRuntimeMode,
 } from './types.js';
 
 export type {
@@ -24,6 +25,8 @@ export type { EffortLevel };
 export type { AgentProviderKind };
 
 export interface AgentProviderCapabilities {
+  /** Provider runtime shape; do not infer this from native steering flags. */
+  runtimeMode: AgentProviderRuntimeMode;
   /** Provider can inject text into a running turn. */
   nativeSteer: boolean;
   /** Provider can enqueue follow-up messages inside its own runtime. */
@@ -76,6 +79,14 @@ export interface StreamChatResult {
   controls?: QueryControls;
 }
 
+/** Runtime metadata for the actual provider session currently running. */
+export interface AgentRuntimeInfo {
+  provider: AgentProviderKind;
+  displayName: string;
+  model?: string;
+  reasoningEffort?: string;
+}
+
 /** Parameters for starting a turn within a LiveSession */
 export interface TurnParams {
   attachments?: FileAttachment[];
@@ -97,6 +108,7 @@ export type MessagePriority = 'now' | 'next' | 'later';
  */
 export interface LiveSession {
   readonly capabilities?: Pick<AgentProviderCapabilities, 'nativeSteer' | 'nativeQueue'>;
+  readonly runtimeInfo?: AgentRuntimeInfo;
   /** Start a new turn (user message → agent response). Returns per-turn event stream. */
   startTurn(prompt: string, params?: TurnParams): StreamChatResult;
   /** Inject text into active turn. No-op if no turn is active. */

@@ -7,11 +7,8 @@ import type {
   StatusData,
   HomeData,
   PermissionStatusData,
-  SessionsData,
-  SessionDetailData,
   HelpData,
   NewSessionData,
-  QueueStatusData,
   DiagnoseData,
   FormattableMessage,
 } from '../../formatting/message-types.js';
@@ -32,14 +29,6 @@ export function presentPermissionStatus(chatId: string, data: PermissionStatusDa
   return { type: 'permissionStatus', chatId, data };
 }
 
-export function presentSessions(chatId: string, data: SessionsData): FormattableMessage {
-  return { type: 'sessions', chatId, data };
-}
-
-export function presentSessionDetail(chatId: string, data: SessionDetailData): FormattableMessage {
-  return { type: 'sessionDetail', chatId, data };
-}
-
 export function presentHelp(chatId: string, data: HelpData): FormattableMessage {
   return { type: 'help', chatId, data };
 }
@@ -48,18 +37,6 @@ export function presentHelp(chatId: string, data: HelpData): FormattableMessage 
 
 export function presentStopResult(chatId: string, interrupted: boolean): { chatId: string; text: string } {
   return { chatId, text: interrupted ? '⏹ Interrupted current execution' : '⚠️ No active execution to stop' };
-}
-
-export function presentNoSessions(chatId: string, hint: string): { chatId: string; text: string } {
-  return { chatId, text: `No sessions found${hint}` };
-}
-
-export function presentSessionSwitched(chatId: string, idx: number, cwd: string, preview: string, feedbackText?: string): { chatId: string; text: string } {
-  const lines = [];
-  if (feedbackText) lines.push(feedbackText);
-  lines.push(`🔄 Switched to session ${idx}`);
-  lines.push(`${cwd} · ${preview}`);
-  return { chatId, text: lines.join('\n') };
 }
 
 export function presentDirectory(chatId: string, cwd: string, withIcon = false, feedbackText?: string): { chatId: string; text: string } {
@@ -145,11 +122,7 @@ export function presentRestartResult(chatId: string): { chatId: string; text: st
   return { chatId, text: '🔄 Restarting... The service will reconnect in a few seconds.' };
 }
 
-// --- Queue/Diagnose messages ---
-
-export function presentQueueStatus(chatId: string, data: QueueStatusData): FormattableMessage {
-  return { type: 'queueStatus', chatId, data };
-}
+// --- Diagnose messages ---
 
 export function presentDiagnose(chatId: string, data: DiagnoseData): FormattableMessage {
   return { type: 'diagnose', chatId, data };

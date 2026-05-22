@@ -1,6 +1,10 @@
 import type { BaseChannelAdapter } from '../../channels/base.js';
 import type { InboundMessage } from '../../channels/types.js';
-import { parseCommandCallback } from '../../core/callbacks.js';
+import {
+  parseActionCallback,
+  parseCommandCallback,
+  type ActionCallback,
+} from '../../core/callbacks.js';
 import { THREAD_SCOPE_SEPARATOR, threadIdFromScope } from '../../core/key.js';
 import type { PermissionCoordinator } from '../coordinators/permission.js';
 import type { SDKEngine } from '../sdk/engine.js';
@@ -9,6 +13,11 @@ export interface CallbackDispatcherDeps {
   permissions: PermissionCoordinator;
   sdkEngine: SDKEngine;
   replayMessage: (adapter: BaseChannelAdapter, msg: InboundMessage) => Promise<boolean>;
+  runAction: (
+    adapter: BaseChannelAdapter,
+    msg: InboundMessage,
+    action: ActionCallback,
+  ) => Promise<boolean>;
 }
 
 export interface CallbackHandlerContext {
@@ -51,7 +60,26 @@ export function buildReplayMessage(
   };
 }
 
+export function buildActionMessage(msg: InboundMessage, action: ActionCallback): InboundMessage {
+  if (!action.route) return msg;
+  const replyTargetMessageId =
+    action.route.replyTargetMessageId ??
+    msg.replyTargetMessageId ??
+    (action.route.threadId ? msg.messageId : undefined);
+
+  return {
+    ...msg,
+    scopeId: action.route.scopeId ?? msg.scopeId,
+    threadId: action.route.threadId ?? msg.threadId,
+    replyInThread: action.route.replyInThread ?? msg.replyInThread,
+    replyTargetMessageId,
+    replyToMessageId: msg.replyToMessageId,
+  };
+}
+
 function explicitSessionKeyFromCallback(callbackData?: string): string | undefined {
+  const action = parseActionCallback(callbackData);
+  if (action?.name === 'stop') return action.args[0]?.trim() || undefined;
   const command = parseCommandCallback(callbackData);
   if (!command?.startsWith('stop ')) return undefined;
   return command.slice('stop '.length).trim() || undefined;

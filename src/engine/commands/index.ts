@@ -1,10 +1,10 @@
 import { commandRegistry } from './registry.js';
 import { StatusCommand } from './status.js';
 import { NewCommand } from './new.js';
-import { HomeCommand, TliveCommand } from './home.js';
+import { HomeCommand, HomeHistoryCommand, HomeTopicsCommand, TliveCommand } from './home.js';
 import { PermCommand } from './perm.js';
 import { StopCommand } from './stop.js';
-import { ContinueSessionCommand, SessionCommand } from './session.js';
+import { ContinueSessionCommand } from './continue.js';
 import { CdCommand } from './cd.js';
 import { PwdCommand } from './pwd.js';
 import { BashCommand } from './bash.js';
@@ -12,10 +12,7 @@ import { SettingsCommand } from './settings.js';
 import { HelpCommand } from './help.js';
 import { UpgradeCommand } from './upgrade.js';
 import { RestartCommand } from './restart.js';
-import { QueueCommand } from './queue.js';
 import { DiagnoseCommand } from './diagnose.js';
-import { RebindCommand } from './rebind.js';
-import { DoctorCommand } from './doctor.js';
 
 /** Register all built-in commands */
 export function registerAllCommands(): void {
@@ -23,9 +20,10 @@ export function registerAllCommands(): void {
   commandRegistry.register(new NewCommand());
   commandRegistry.register(new TliveCommand());
   commandRegistry.register(new HomeCommand());
+  commandRegistry.register(new HomeTopicsCommand());
+  commandRegistry.register(new HomeHistoryCommand());
   commandRegistry.register(new PermCommand());
   commandRegistry.register(new StopCommand());
-  commandRegistry.register(new SessionCommand());
   commandRegistry.register(new ContinueSessionCommand());
   commandRegistry.register(new CdCommand());
   commandRegistry.register(new PwdCommand());
@@ -34,10 +32,7 @@ export function registerAllCommands(): void {
   commandRegistry.register(new HelpCommand());
   commandRegistry.register(new UpgradeCommand());
   commandRegistry.register(new RestartCommand());
-  commandRegistry.register(new QueueCommand());
   commandRegistry.register(new DiagnoseCommand());
-  commandRegistry.register(new RebindCommand());
-  commandRegistry.register(new DoctorCommand());
 }
 
 export { commandRegistry } from './registry.js';

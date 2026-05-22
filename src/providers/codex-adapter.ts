@@ -5,6 +5,7 @@ interface CodexAdapterState {
   threadId?: string;
   model?: string;
   emittedTextByItem: Map<string, string>;
+  emittedToolOutputByItem: Map<string, string>;
   startedTools: Set<string>;
   completedTools: Set<string>;
   terminalEmitted: boolean;
@@ -13,6 +14,7 @@ interface CodexAdapterState {
 export class CodexAdapter {
   private state: CodexAdapterState = {
     emittedTextByItem: new Map(),
+    emittedToolOutputByItem: new Map(),
     startedTools: new Set(),
     completedTools: new Set(),
     terminalEmitted: false,
@@ -29,6 +31,7 @@ export class CodexAdapter {
       threadId,
       model,
       emittedTextByItem: new Map(),
+      emittedToolOutputByItem: new Map(),
       startedTools: new Set(),
       completedTools: new Set(),
       terminalEmitted: false,
@@ -48,11 +51,10 @@ export class CodexAdapter {
         events.push({
           kind: 'status',
           sessionId: event.thread_id,
-          model: this.state.model ?? 'codex',
+          ...(this.state.model ? { model: this.state.model } : {}),
         });
         break;
       case 'turn.started':
-        events.push({ kind: 'session_state', state: 'running' });
         break;
       case 'item.started':
         this.mapStartedItem(event.item, events);
@@ -96,7 +98,11 @@ export class CodexAdapter {
   }
 
   private mapUpdatedItem(item: ThreadItem, events: CanonicalEvent[]): void {
-    this.emitLiveItemUpdate(item, events);
+    if (this.emitLiveItemUpdate(item, events)) return;
+    if (item.type === 'command_execution') {
+      this.emitToolStart(item, events);
+      this.emitCommandOutputUpdate(item, events);
+    }
   }
 
   private mapCompletedItem(item: ThreadItem, events: CanonicalEvent[]): void {
@@ -109,7 +115,7 @@ export class CodexAdapter {
     }
     if (this.isToolItem(item)) {
       this.emitToolStart(item, events);
-      this.emitToolResult(item, events);
+      this.emitToolResult(item, events, true);
     }
   }
 
@@ -157,7 +163,25 @@ export class CodexAdapter {
     });
   }
 
-  private emitToolResult(item: ToolThreadItem, events: CanonicalEvent[]): void {
+  private emitCommandOutputUpdate(
+    item: Extract<ToolThreadItem, { type: 'command_execution' }>,
+    events: CanonicalEvent[],
+  ): void {
+    const output = item.aggregated_output.trimEnd();
+    if (!output) return;
+    const previous = this.state.emittedToolOutputByItem.get(item.id) ?? '';
+    if (output === previous) return;
+    this.state.emittedToolOutputByItem.set(item.id, output);
+    events.push({
+      kind: 'tool_result',
+      toolUseId: item.id,
+      content: output,
+      isError: false,
+      isFinal: false,
+    });
+  }
+
+  private emitToolResult(item: ToolThreadItem, events: CanonicalEvent[], isFinal: boolean): void {
     if (this.state.completedTools.has(item.id)) return;
     this.state.completedTools.add(item.id);
     events.push({
@@ -165,6 +189,7 @@ export class CodexAdapter {
       toolUseId: item.id,
       content: toolResultContent(item),
       isError: toolFailed(item),
+      isFinal,
     });
   }
 
@@ -198,6 +223,12 @@ export class CodexAdapter {
       usage: {
         inputTokens: usage?.input_tokens ?? 0,
         outputTokens: usage?.output_tokens ?? 0,
+        ...(usage?.cached_input_tokens !== undefined
+          ? { cachedInputTokens: usage.cached_input_tokens }
+          : {}),
+        ...(usage?.reasoning_output_tokens !== undefined
+          ? { reasoningOutputTokens: usage.reasoning_output_tokens }
+          : {}),
       },
       ...(error ? { error } : {}),
     };
@@ -212,7 +243,7 @@ type ToolThreadItem = Extract<
 function toolName(item: ToolThreadItem): string {
   switch (item.type) {
     case 'command_execution':
-      return 'Shell';
+      return 'Bash';
     case 'file_change':
       return 'ApplyPatch';
     case 'mcp_tool_call':
@@ -227,7 +258,10 @@ function toolInput(item: ToolThreadItem): Record<string, unknown> {
     case 'command_execution':
       return { command: item.command };
     case 'file_change':
-      return { changes: item.changes };
+      return {
+        path: item.changes.map((change) => change.path).join(', '),
+        changes: item.changes,
+      };
     case 'mcp_tool_call':
       return isRecord(item.arguments) ? item.arguments : { arguments: item.arguments };
     case 'web_search':
@@ -247,7 +281,7 @@ function toolResultContent(item: ToolThreadItem): string {
       );
     case 'mcp_tool_call':
       if (item.error) return item.error.message;
-      return stringifyUnknown(item.result ?? {});
+      return stringifyMcpResult(item.result);
     case 'web_search':
       return `query: ${item.query}`;
   }
@@ -273,6 +307,24 @@ function stringifyUnknown(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+function stringifyMcpResult(value: unknown): string {
+  if (!isRecord(value)) return stringifyUnknown(value ?? {});
+  const content = value.content;
+  if (Array.isArray(content)) {
+    const text = content
+      .map((block) => {
+        if (!isRecord(block)) return '';
+        if (block.type === 'text' && typeof block.text === 'string') return block.text;
+        return stringifyUnknown(block);
+      })
+      .filter(Boolean)
+      .join('\n');
+    if (text.trim()) return text;
+  }
+  if ('structured_content' in value) return stringifyUnknown(value.structured_content);
+  return stringifyUnknown(value);
 }
 
 function errorMessage(error: unknown): string {

@@ -19,7 +19,6 @@ export const zh: Translations = {
   'home.workspaceBinding': '工作区绑定',
   'home.activeSessions': '活跃会话',
   'home.recentSessions': '**最近会话**',
-  'home.btnSessions': '🕘 最近会话',
   'home.btnPermissions': '🔐 权限设置',
   'home.btnNew': '🆕 新会话',
   'home.btnHelp': '❓ 帮助',
@@ -61,16 +60,11 @@ export const zh: Translations = {
   'perm.labelModeOn': '开启审批',
   'perm.labelModeOff': '关闭审批',
   'perm.labelResult': '执行结果',
-  'perm.labelTool': '工具',
-  'perm.labelInput': '输入',
-  'perm.labelExpiresIn': '分钟内处理',
   'perm.labelSession': '会话',
   'perm.labelSessionMemory': '本会话记忆',
   'perm.labelTools': '工具',
   'perm.labelBashPrefixes': 'Bash 前缀',
   'perm.labelNoPending': '暂无',
-  'perm.hintReply': '💬 也可以直接回复 **allow** / **deny** / **always**。',
-  'perm.labelViewInTerminal': '🔗 在终端中查看',
   'perm.labelQuestion': '问题',
   'perm.labelOptions': '选项',
   'perm.labelDescription': '说明',
@@ -97,23 +91,6 @@ export const zh: Translations = {
   'taskStart.previousSession': '上次会话',
   'taskStart.btnSettings': '⚡ 调整配置',
   'taskStart.btnNew': '🆕 新会话',
-
-  // --- sessions ---
-  'sessions.title': '📋 **会话列表**',
-  'sessions.btnList': '📋 会话列表',
-  'sessions.btnRecent': '📋 最近会话',
-  'sessions.btnAll': '📋 所有会话',
-  'sessions.subtitleAll': '(全局)',
-  'sessions.subtitleRecent': '(当前工作区)',
-  'sessions.currentMarker': ' ◀ 当前',
-  'sessions.switchTo': '▶️ 切换到',
-  'sessions.labelDirectory': '目录',
-  'sessions.labelTime': '时间',
-  'sessions.labelSize': '大小',
-  'sessions.labelPreview': '预览',
-  'sessions.inputPlaceholder': '输入编号切换其他会话',
-  'sessions.btnConfirmSwitch': '✅ 切换',
-  'sessions.footer': '\n使用 /session <n> 切换',
 
   // --- newSession ---
   'newSession.title': '✅ **新会话**',
@@ -176,13 +153,6 @@ export const zh: Translations = {
   'progress.taskLabel': '任务',
   'progress.timeLabel': '耗时',
 
-  // --- queue ---
-  'queue.emptyMessage': '队列已为空',
-  'queue.noActiveSession': '⚠️ 无活跃会话，队列不可用',
-  'queue.cleared': '✅ 已清空队列',
-  'queue.depthInvalid': '⚠️ 队列深度需为 1-10 的整数',
-  'queue.depthSet': '✅ 已设置队列深度为',
-
   // --- format ---
   'format.justNow': '刚刚',
   'format.continueTask': '继续当前任务',
@@ -208,7 +178,6 @@ export const zh: Translations = {
   'format.taskStartHint': '💡 任务已开始执行。如需调整配置，点击下方按钮。',
   'format.titleStatus': '📊 TLive 状态',
   'format.titleHome': '🏠 工作台',
-  'format.titlePermission': '🔐 待审批动作',
   'format.titlePermissionStatus': '🔐 权限状态',
   'format.titleQuestion': '❓ 等待回答',
   'format.titleDeferredInput': '⏳ 等待输入',
@@ -216,6 +185,7 @@ export const zh: Translations = {
   'format.titleTaskStart': '🚀 开始执行',
   'format.titleTaskEnd': '⚠️ 任务结束',
   'format.titleTaskSummary': '✅ 任务摘要',
+  'format.titleDiagnose': '🩺 内部诊断',
   'format.statusRunning': '运行中',
   'format.statusDisconnected': '已断开',
   'format.statusActive': '活跃',
@@ -224,6 +194,19 @@ export const zh: Translations = {
   'format.queueEmpty': '队列已为空',
   'format.flushErrorTitle': '消息发送失败',
   'format.flushErrorHint': '可能原因：内容超出平台限制（如表格行数、消息长度）。',
+
+  // --- diagnose ---
+  'diagnose.labelSessions': '会话',
+  'diagnose.labelQueuedMessages': '排队消息',
+  'diagnose.labelProcessingChats': '处理中对话',
+  'diagnose.labelBubbleMappings': '卡片路由缓存（内存）',
+  'diagnose.labelPersistedBindings': '持久化绑定',
+  'diagnose.labelPersistedTopicSessions': '持久化话题',
+  'diagnose.labelCurrentChat': '当前聊天',
+  'diagnose.labelQueueUtilization': '队列使用率',
+  'diagnose.labelSaturatedSessions': '队列已满会话',
+  'diagnose.labelBusiestSession': '最忙会话',
+  'diagnose.labelQueueDetail': '队列详情',
 
   // --- adapter ---
   'adapter.submitted': '已提交',
@@ -244,18 +227,4 @@ export const zh: Translations = {
   'error.title': '❌ 处理失败',
   'error.requestId': '请求ID',
 
-  // --- doctor command ---
-  'doctor.title': '系统诊断',
-  'doctor.os': '操作系统',
-  'doctor.node': 'Node.js',
-  'doctor.tlive': 'TLive',
-  'doctor.uptime': '运行时间',
-  'doctor.config': '配置文件',
-  'doctor.configFound': '已配置',
-  'doctor.configMissing': '未找到',
-  'doctor.providers': '执行引擎',
-  'doctor.notFound': '未安装',
-  'doctor.channels': '通道状态',
-  'doctor.connected': '已连接',
-  'doctor.disconnected': '未连接',
 };

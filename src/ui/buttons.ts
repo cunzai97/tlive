@@ -7,7 +7,12 @@ import type { Button } from './types.js';
 import type { Locale, TranslationKey } from '../i18n/index.js';
 import type { AgentProviderKind } from '../providers/kinds.js';
 import { t } from '../i18n/index.js';
-import { CALLBACK_PREFIXES, commandCallback } from '../core/callbacks.js';
+import {
+  CALLBACK_PREFIXES,
+  actionCallback,
+  routedActionCallback,
+  type ActionCallbackRoute,
+} from '../core/callbacks.js';
 import {
   DEFAULT_DONE_BUTTONS,
   QUICK_BUTTONS,
@@ -58,7 +63,7 @@ function navNewForProvider(
     locale === 'zh' ? `🆕 新 ${provider.displayName} 会话` : `🆕 New ${provider.displayName}`;
   return {
     label,
-    callbackData: `${CALLBACK_PREFIXES.CMD}new ${provider.kind}`,
+    callbackData: actionCallback('new', provider.kind),
     style: provider.isDefault ? 'primary' : 'default',
     row,
   };
@@ -68,22 +73,10 @@ function navHelp(locale: Locale): Button {
   return quickButton(locale, 'help', { row: 1 });
 }
 
-function navTopicHelp(locale: Locale): Button {
-  return quickButton(locale, 'help', { row: 0 });
-}
-
-function navSessionsList(locale: Locale): Button {
-  return quickButton(locale, 'sessions', { labelKey: 'sessions.btnList', row: 0 });
-}
-
-function navSessionsRecent(locale: Locale): Button {
-  return quickButton(locale, 'sessions', { style: 'primary', row: 0 });
-}
-
 function navStop(locale: Locale, sessionKey?: string): Button {
   return {
     label: t(locale, 'progress.btnStop'),
-    callbackData: commandCallback('stop', sessionKey),
+    callbackData: actionCallback('stop', sessionKey),
     style: 'danger',
     row: 0,
   };
@@ -92,7 +85,7 @@ function navStop(locale: Locale, sessionKey?: string): Button {
 function navSettings(locale: Locale): Button {
   return {
     label: t(locale, 'taskStart.btnSettings'),
-    callbackData: `${CALLBACK_PREFIXES.CMD}home`,
+    callbackData: actionCallback('home'),
     style: 'default',
     row: 0,
   };
@@ -202,12 +195,7 @@ export function homeButtons(
   locale: Locale,
   providers: readonly NewSessionButtonProvider[] = [],
 ): Button[] {
-  return [
-    navSessionsRecent(locale),
-    navPerm(locale),
-    ...newSessionButtons(locale, providers, 1),
-    navHelp(locale),
-  ];
+  return [navPerm(locale), ...newSessionButtons(locale, providers, 1), navHelp(locale)];
 }
 
 export function progressDoneButtons(
@@ -232,31 +220,68 @@ export function taskSummaryButtons(
   return quickButtons(locale, names);
 }
 
-export function topicDoneButtons(locale: Locale): Button[] {
-  return [navTopicHelp(locale)];
+export function topicDoneButtons(_locale: Locale): Button[] {
+  return [];
+}
+
+export function topicCommandPaletteButtons(
+  locale: Locale,
+  options: {
+    isActive?: boolean;
+    interactivePermissions?: boolean;
+    route?: ActionCallbackRoute;
+  } = {},
+): Button[] {
+  const action = (name: string, ...args: Array<string | undefined>) =>
+    options.route
+      ? routedActionCallback(name, options.route, ...args)
+      : actionCallback(name, ...args);
+  const buttons: Button[] = [];
+
+  if (options.interactivePermissions) {
+    buttons.push({
+      label: locale === 'zh' ? '🔐 工具审批' : t(locale, 'home.btnPermissions'),
+      callbackData: action('perm'),
+      style: 'default',
+      row: 0,
+    });
+  }
+
+  if (options.isActive) {
+    buttons.push({
+      ...navStop(locale),
+      callbackData: action('stop'),
+      row: 0,
+    });
+  }
+
+  return buttons;
 }
 
 export function helpButtons(locale: Locale): Button[] {
-  return [
-    { ...navNew(locale), style: 'primary' as const, row: 0 },
-    { ...navSessionsList(locale), row: 0 },
-  ];
+  return [{ ...navNew(locale), style: 'primary' as const, row: 0 }];
 }
 
-export function permStatusButtons(mode: 'on' | 'off', locale: Locale): Button[] {
+export function permStatusButtons(
+  mode: 'on' | 'off',
+  locale: Locale,
+  route?: ActionCallbackRoute,
+): Button[] {
+  const action = (name: string, ...args: Array<string | undefined>) =>
+    route ? routedActionCallback(name, route, ...args) : actionCallback(name, ...args);
   const toggle: Button =
     mode === 'on'
       ? {
           label: t(locale, 'perm.btnTurnOff'),
-          callbackData: `${CALLBACK_PREFIXES.CMD}perm off`,
+          callbackData: action('perm', 'off'),
           style: 'danger',
           row: 0,
         }
       : {
           label: t(locale, 'perm.btnTurnOn'),
-          callbackData: `${CALLBACK_PREFIXES.CMD}perm on`,
+          callbackData: action('perm', 'on'),
           style: 'primary',
           row: 0,
         };
-  return [toggle, navHome(locale)];
+  return route ? [toggle] : [toggle, navHome(locale)];
 }

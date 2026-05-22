@@ -1,86 +1,29 @@
 import { describe, it, expect } from 'vitest';
-import { markdownToHtml, truncateLongCodeBlocks } from '../../markdown/index.js';
-import { markdownToFeishu } from '../../channels/feishu/markdown.js';
+import {
+  downgradeHeadings,
+  sanitizeFeishuMarkdown,
+} from '../../channels/feishu/markdown.js';
 
 describe('Feishu rendering', () => {
-  it('passes through markdown unchanged', () => {
-    const md = '**bold** and `code`';
-    expect(markdownToFeishu(md)).toBe(md);
-  });
-});
+  it('converts external markdown images to links for Feishu cards', () => {
+    const md = '[![CI](https://github.com/org/repo/actions/workflows/ci.yml/badge.svg)](https://github.com/org/repo/actions)';
+    const result = sanitizeFeishuMarkdown(md);
 
-describe('markdownToHtml improvements', () => {
-  it('converts tables to <pre> monospace', () => {
-    const md = '| Name | Age |\n|------|-----|\n| Alice | 30 |\n| Bob | 25 |';
-    const html = markdownToHtml(md);
-    expect(html).toContain('<pre>');
-    expect(html).toContain('Alice');
-    expect(html).toContain('Bob');
-    expect(html).not.toContain('<table');
+    expect(result).not.toContain('![');
+    expect(result).toBe('[CI](https://github.com/org/repo/actions)');
   });
 
-  it('renders nested lists with indentation', () => {
-    const md = '- parent\n  - child\n    - grandchild';
-    const html = markdownToHtml(md);
-    expect(html).toContain('• parent');
-    expect(html).toContain('  • child');
-    expect(html).toContain('    • grandchild');
+  it('keeps markdown image syntax inside fenced code blocks', () => {
+    const md = '```md\n![CI](https://example.com/badge.svg)\n```\n![Logo](https://example.com/logo.svg)';
+
+    expect(sanitizeFeishuMarkdown(md)).toBe(
+      '```md\n![CI](https://example.com/badge.svg)\n```\n[Logo](https://example.com/logo.svg)',
+    );
   });
 
-  it('renders ordered lists with numbers', () => {
-    const md = '1. first\n2. second\n3. third';
-    const html = markdownToHtml(md);
-    expect(html).toContain('1. first');
-    expect(html).toContain('2. second');
-    expect(html).toContain('3. third');
-  });
-
-  it('strips code block language class attributes', () => {
-    const md = '```typescript\nconst x = 1;\n```';
-    const html = markdownToHtml(md);
-    expect(html).toContain('<pre>');
-    expect(html).toContain('const x = 1;');
-    expect(html).not.toContain('class=');
-    expect(html).not.toContain('language-');
-  });
-
-  it('converts blockquote', () => {
-    const md = '> This is a quote';
-    const html = markdownToHtml(md);
-    expect(html).toMatch(/❝.*This is a quote/);
-  });
-});
-
-describe('code block truncation', () => {
-  it('truncates code blocks over 50 lines', () => {
-    const lines = Array.from({ length: 80 }, (_, i) => `line ${i + 1}`);
-    const md = '```\n' + lines.join('\n') + '\n```';
-    const result = truncateLongCodeBlocks(md);
-    expect(result).toContain('line 1');
-    expect(result).toContain('line 30');
-    expect(result).not.toContain('line 31');
-    expect(result).toContain('... (40 lines omitted)');
-    expect(result).toContain('line 71');
-    expect(result).toContain('line 80');
-  });
-
-  it('does not truncate short code blocks', () => {
-    const md = '```\nshort\n```';
-    expect(truncateLongCodeBlocks(md)).toBe(md);
-  });
-
-  it('respects custom maxLines', () => {
-    const lines = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`);
-    const md = '```\n' + lines.join('\n') + '\n```';
-    const result = truncateLongCodeBlocks(md, 10);
-    expect(result).toContain('... (');
-  });
-
-  it('handles multiple code blocks independently', () => {
-    const long = Array.from({ length: 60 }, (_, i) => `a${i}`).join('\n');
-    const md = '```\n' + long + '\n```\nMiddle text\n```\nshort code\n```';
-    const result = truncateLongCodeBlocks(md);
-    expect(result).toContain('... (');
-    expect(result).toContain('short code');
+  it('sanitizes images through card markdown helpers', () => {
+    expect(downgradeHeadings('# Title\n![CI](https://example.com/badge.svg)')).toBe(
+      '**Title**\n[CI](https://example.com/badge.svg)',
+    );
   });
 });

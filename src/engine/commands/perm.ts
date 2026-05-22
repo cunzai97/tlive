@@ -14,16 +14,30 @@ export class PermCommand extends BaseCommand {
     const sub = ctx.parts[1]?.toLowerCase();
     const scopeId = ctx.scopeId;
     const binding = await ctx.services.store.getBinding(ctx.msg.channelType, scopeId);
-    const sessionId = binding?.sessionId;
-    const mode = (sub === 'on' || sub === 'off') ? sub : ctx.services.state.getPermMode(ctx.msg.channelType, scopeId, sessionId);
+    const sessionId = ctx.surface === 'workbench' ? undefined : binding?.sessionId;
+    const mode =
+      sub === 'on' || sub === 'off'
+        ? sub
+        : ctx.services.state.getPermMode(ctx.msg.channelType, scopeId, sessionId);
     if (sub === 'on' || sub === 'off') {
       ctx.services.state.setPermMode(ctx.msg.channelType, scopeId, sessionId, sub);
     }
     const chatKey = ctx.services.state.stateKey(ctx.msg.channelType, scopeId);
-    await this.send(ctx, presentPermissionStatus(ctx.msg.chatId, {
-      mode,
-      ...ctx.services.permissions.getPermissionStatus(chatKey, binding?.sessionId),
-    }));
+    const route = ctx.surface === 'topic'
+      ? {
+          scopeId,
+          threadId: ctx.msg.threadId,
+          replyInThread: ctx.msg.replyInThread ?? !!ctx.msg.threadId,
+        }
+      : undefined;
+    await this.send(
+      ctx,
+      presentPermissionStatus(ctx.msg.chatId, {
+        mode,
+        route,
+        ...ctx.services.permissions.getPermissionStatus(chatKey, binding?.sessionId),
+      }),
+    );
     return true;
   }
 }

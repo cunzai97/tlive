@@ -121,7 +121,12 @@ interface ProcessMessageParams {
   attachments?: FileAttachment[];
   onTextDelta?: (delta: string) => void;
   onToolStart?: (event: { id: string; name: string; input: Record<string, unknown> }) => void;
-  onToolResult?: (event: { toolUseId: string; content: string; isError: boolean }) => void;
+  onToolResult?: (event: {
+    toolUseId: string;
+    content: string;
+    isError: boolean;
+    isFinal?: boolean;
+  }) => void;
   /** Called when query completes — returns Promise to allow async flush of final message */
   onQueryResult?: (event: {
     sessionId: string;
@@ -129,6 +134,8 @@ interface ProcessMessageParams {
     usage: {
       inputTokens: number;
       outputTokens: number;
+      cachedInputTokens?: number;
+      reasoningOutputTokens?: number;
       costUsd?: number;
       modelUsage?: Record<
         string,
@@ -157,7 +164,7 @@ interface ProcessMessageParams {
   onPromptSuggestion?: (suggestion: string) => void;
   onToolProgress?: (data: { toolName: string; elapsed: number }) => void;
   onRateLimit?: (data: { status: string; utilization?: number; resetsAt?: number }) => void;
-  onStatus?: (data: { sessionId: string; model: string }) => void;
+  onStatus?: (data: { sessionId: string; model?: string }) => void;
   onSessionInfo?: (data: {
     sessionId: string;
     model: string;
@@ -166,7 +173,6 @@ interface ProcessMessageParams {
     skills?: string[];
   }) => void;
   onToolUseSummary?: (summary: string) => void;
-  onSessionState?: (state: 'idle' | 'running' | 'requires_action') => void;
   onApiRetry?: (data: {
     attempt: number;
     maxRetries: number;
@@ -197,7 +203,13 @@ interface ProcessMessageParams {
 
 interface ProcessMessageResult {
   text: string;
-  usage?: { inputTokens: number; outputTokens: number; costUsd?: number };
+  usage?: {
+    inputTokens: number;
+    outputTokens: number;
+    cachedInputTokens?: number;
+    reasoningOutputTokens?: number;
+    costUsd?: number;
+  };
 }
 
 export class ConversationEngine {
@@ -206,7 +218,7 @@ export class ConversationEngine {
   async processMessage(params: ProcessMessageParams): Promise<ProcessMessageResult> {
     const lockKey = `session:${params.sdkSessionId || `new-${Date.now()}`}`;
     let fullText = '';
-    let usage: { inputTokens: number; outputTokens: number; costUsd?: number } | undefined;
+    let usage: ProcessMessageResult['usage'];
 
     // 1. Acquire lock
     await this.store.acquireLock(lockKey, 600_000);
@@ -296,9 +308,6 @@ export class ConversationEngine {
             break;
           case 'tool_use_summary':
             params.onToolUseSummary?.(value.summary);
-            break;
-          case 'session_state':
-            params.onSessionState?.(value.state);
             break;
           case 'api_retry':
             params.onApiRetry?.(value);

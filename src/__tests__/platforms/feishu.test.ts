@@ -66,6 +66,7 @@ vi.mock('@larksuiteoapi/node-sdk', () => {
 });
 
 import { FeishuAdapter } from '../../channels/feishu/adapter.js';
+import { RateLimitError } from '../../channels/errors.js';
 
 describe('FeishuAdapter', () => {
   let adapter: FeishuAdapter;
@@ -91,10 +92,6 @@ describe('FeishuAdapter', () => {
     });
   });
 
-  it('has correct channelType', () => {
-    expect(adapter.channelType).toBe('feishu');
-  });
-
   describe('validateConfig()', () => {
     it('returns error when appId is missing', () => {
       const bad = new FeishuAdapter({ appId: '', appSecret: 'sec', verificationToken: '', encryptKey: '', webhookPort: 0, allowedUsers: [] });
@@ -108,6 +105,24 @@ describe('FeishuAdapter', () => {
 
     it('returns null when config is valid', () => {
       expect(adapter.validateConfig()).toBeNull();
+    });
+  });
+
+  describe('classifyError()', () => {
+    it('treats Feishu message patch frequency errors as rate limits', () => {
+      const err = adapter.classifyError({ code: 230020, message: 'frequency limit' });
+      expect(err).toBeInstanceOf(RateLimitError);
+      expect((err as RateLimitError).retryAfterMs).toBe(2000);
+    });
+
+    it('reads retry-after headers for 429 responses', () => {
+      const err = adapter.classifyError({
+        status: 429,
+        message: 'too many requests',
+        headers: { 'retry-after': '3' },
+      });
+      expect(err).toBeInstanceOf(RateLimitError);
+      expect((err as RateLimitError).retryAfterMs).toBe(3000);
     });
   });
 
@@ -144,30 +159,6 @@ describe('FeishuAdapter', () => {
 
       expect(result.success).toBe(true);
       expect(result.messageId).toBe('msg-feishu-1');
-      await adapter.stop();
-    });
-
-    it('includes action buttons in card when provided', async () => {
-      await adapter.start();
-      await adapter.send({
-        chatId: 'oc_chat123',
-        text: 'Permission?',
-        buttons: [
-          { label: 'Allow', callbackData: 'perm:allow:123', style: 'primary' },
-          { label: 'Deny', callbackData: 'perm:deny:123', style: 'danger' },
-        ],
-      });
-
-      const call = mockMessageCreate.mock.calls[0][0];
-      const card = JSON.parse(call.data.content);
-      // Schema 2.0: buttons in column_set with behaviors
-      expect(card.body.elements[1].tag).toBe('column_set');
-      expect(card.body.elements[1].columns).toHaveLength(2);
-      const btn0 = card.body.elements[1].columns[0].elements[0];
-      const btn1 = card.body.elements[1].columns[1].elements[0];
-      expect(btn0.tag).toBe('button');
-      expect(btn0.text.content).toBe('Allow');
-      expect(btn1.type).toBe('danger');
       await adapter.stop();
     });
 
@@ -370,12 +361,13 @@ describe('FeishuAdapter', () => {
   });
 
   describe('start() / stop()', () => {
-    it('initializes client and WSClient on start', async () => {
+    it('starts websocket transport before accepting sends', async () => {
       await adapter.start();
       expect(mockWsStart).toHaveBeenCalledOnce();
-      await expect(
-        adapter.send({ chatId: 'oc_chat', text: 'test' }),
-      ).resolves.toBeDefined();
+
+      await adapter.send({ chatId: 'oc_chat', text: 'test' });
+      expect(mockMessageCreate).toHaveBeenCalledOnce();
+
       await adapter.stop();
     });
 
@@ -385,13 +377,6 @@ describe('FeishuAdapter', () => {
       await expect(adapter.send({ chatId: 'oc_chat', text: 'test' })).rejects.toThrow(
         'Feishu client not started',
       );
-    });
-  });
-
-  describe('consumeOne()', () => {
-    it('returns null when queue is empty', async () => {
-      const msg = await adapter.consumeOne();
-      expect(msg).toBeNull();
     });
   });
 
@@ -407,17 +392,21 @@ describe('FeishuAdapter', () => {
       await adapter.stop();
     });
 
+    it('propagates rate limits so the renderer can back off', async () => {
+      await adapter.start();
+      mockMessagePatch.mockRejectedValueOnce({ code: 230020, message: 'frequency limit' });
+
+      await expect(adapter.editMessage('oc_chat123', 'msg-feishu-1', {
+        chatId: 'oc_chat123',
+        text: 'Updated content',
+      })).rejects.toBeInstanceOf(RateLimitError);
+
+      await adapter.stop();
+    });
+
     it('does nothing when client is not started', async () => {
       await adapter.editMessage('oc_chat', 'msg-1', { chatId: 'oc_chat', text: 'hi' });
       expect(mockMessagePatch).not.toHaveBeenCalled();
-    });
-  });
-
-  describe('sendTyping()', () => {
-    it('is a no-op that resolves without error', async () => {
-      await adapter.start();
-      await expect(adapter.sendTyping('oc_chat123')).resolves.toBeUndefined();
-      await adapter.stop();
     });
   });
 
@@ -695,8 +684,67 @@ describe('FeishuAdapter', () => {
         userId: 'user_1',
         messageId: 'om_123',
       });
-      expect(msg!.callbackData).toContain('form:askq-123:');
-      expect(msg!.callbackData).toContain('_text_answer');
+      expect(msg!.callbackData).toBe(
+        'form:askq-123:{"_interaction_id":"askq-123","_text_answer":"my answer"}',
+      );
+
+      await adapter.stop();
+    });
+
+    it('uses form submit action name when form_value has no interaction id', async () => {
+      await adapter.start();
+
+      const handler = eventHandlers.get('card.action.trigger');
+      await handler?.({
+        operator: { user_id: 'user_1' },
+        action: {
+          name: 'tlive_command',
+          form_value: { _tlive_command: 'cd ..' },
+        },
+        context: { chat_id: 'chat_1', open_message_id: 'om_tlive' },
+      });
+
+      const msg = await adapter.consumeOne();
+      expect(msg!.callbackData).toBe('form:tlive_command:{"_tlive_command":"cd .."}');
+
+      await adapter.stop();
+    });
+
+    it('infers workbench command form from field names when action name is missing', async () => {
+      await adapter.start();
+
+      const handler = eventHandlers.get('card.action.trigger');
+      await handler?.({
+        operator: { user_id: 'user_1' },
+        action: {
+          form_value: { _tlive_command: 'cd ..' },
+        },
+        context: { chat_id: 'chat_1', open_message_id: 'om_tlive' },
+      });
+
+      const msg = await adapter.consumeOne();
+      expect(msg!.callbackData).toBe('form:tlive_command:{"_tlive_command":"cd .."}');
+
+      await adapter.stop();
+    });
+
+    it('prefers explicit form interaction id over action name', async () => {
+      await adapter.start();
+
+      const handler = eventHandlers.get('card.action.trigger');
+      await handler?.({
+        operator: { user_id: 'user_1' },
+        action: {
+          name: 'tlive_command',
+          form_value: { _interaction_id: 'askq-789', _text_answer: 'ok' },
+        },
+        context: { chat_id: 'chat_1', open_message_id: 'om_789' },
+      });
+
+      const msg = await adapter.consumeOne();
+      expect(msg!.callbackData).toBe(
+        'form:askq-789:{"_interaction_id":"askq-789","_text_answer":"ok"}',
+      );
 
       await adapter.stop();
     });
@@ -711,33 +759,60 @@ describe('FeishuAdapter', () => {
         context: { chat_id: 'chat_1', open_message_id: 'om_456' },
       });
 
+      expect(result).toEqual({
+        toast: {
+          type: 'success',
+          content: '已提交',
+        },
+      });
+
       const msg = await adapter.consumeOne();
-      expect(msg!.callbackData).toContain('form:askq-456:');
-      expect(msg!.callbackData).toContain('_select');
+      expect(msg!.callbackData).toBe(
+        'form:askq-456:{"_interaction_id":"askq-456","_select":"Option A"}',
+      );
 
       await adapter.stop();
     });
 
-    it('maps application bot menu events to commands', async () => {
+    it('maps application bot menu events to the workbench', async () => {
+      await adapter.start();
+
+      const handler = eventHandlers.get('application.bot.menu_v6');
+      expect(handler).toBeTypeOf('function');
+
+      for (const eventKey of ['tlive_home', 'tlive_status', 'tlive_help']) {
+        const result = await handler?.({
+          event_key: eventKey,
+          operator: { operator_id: { user_id: 'user_1' } },
+        });
+
+        expect(result).toEqual({});
+
+        const msg = await adapter.consumeOne();
+        expect(msg).toMatchObject({
+          channelType: 'feishu',
+          chatId: '',
+          userId: 'user_1',
+          text: '/home',
+        });
+      }
+
+      await adapter.stop();
+    });
+
+    it('ignores unknown application bot menu events', async () => {
       await adapter.start();
 
       const handler = eventHandlers.get('application.bot.menu_v6');
       expect(handler).toBeTypeOf('function');
 
       const result = await handler?.({
-        event_key: 'tlive_home',
+        event_key: 'tlive_unknown',
         operator: { operator_id: { user_id: 'user_1' } },
       });
 
       expect(result).toEqual({});
-
-      const msg = await adapter.consumeOne();
-      expect(msg).toMatchObject({
-        channelType: 'feishu',
-        chatId: '',
-        userId: 'user_1',
-        text: '/home',
-      });
+      expect(await adapter.consumeOne()).toBeNull();
 
       await adapter.stop();
     });

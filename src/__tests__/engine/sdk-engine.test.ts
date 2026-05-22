@@ -33,6 +33,10 @@ function createMockProvider(sessions: Record<string, LiveSession> = {}): ClaudeS
 const DEFAULT_SESSION_ID = 'session-1';
 const DEFAULT_SESSION_KEY = `feishu:chat-1:${DEFAULT_SESSION_ID}`;
 
+function queueDepth(engine: SDKEngine, sessionKey: string): number {
+  return engine.getQueueInfo(sessionKey)?.depth ?? 0;
+}
+
 function createEngineSession(
   engine: SDKEngine,
   provider: ClaudeSDKProvider,
@@ -52,26 +56,6 @@ describe('SDKEngine', () => {
 
   beforeEach(() => {
     engine = new SDKEngine();
-  });
-
-  describe('Queue Depth Management', () => {
-    it('starts with queue depth 0', () => {
-      expect(engine.getQueueDepth('test-session')).toBe(0);
-    });
-
-    it('reports queue as not full when depth is 0', () => {
-      expect(engine.isQueueFull('test-session')).toBe(false);
-    });
-
-    it('default max queue depth is 3', () => {
-      expect(engine.getMaxQueueDepth()).toBe(3);
-    });
-
-    it('decrements queue depth when called', () => {
-      // Simulate queue depth being set
-      engine.decrementQueueDepth('test-session'); // No effect when depth is 0
-      expect(engine.getQueueDepth('test-session')).toBe(0);
-    });
   });
 
   describe('sendWithContext', () => {
@@ -211,7 +195,7 @@ describe('SDKEngine', () => {
       await engine.sendWithContext('feishu', 'chat-1', 'steer 2');
 
       const sessionKey = DEFAULT_SESSION_KEY;
-      expect(engine.getQueueDepth(sessionKey)).toBe(0);
+      expect(queueDepth(engine, sessionKey)).toBe(0);
     });
 
     it('cleans up queue depth when session is closed', async () => {
@@ -222,10 +206,10 @@ describe('SDKEngine', () => {
       await engine.sendWithContext('feishu', 'chat-1', 'queued');
 
       const sessionKey = DEFAULT_SESSION_KEY;
-      expect(engine.getQueueDepth(sessionKey)).toBe(1);
+      expect(queueDepth(engine, sessionKey)).toBe(1);
 
       engine.closeSession('feishu', 'chat-1', '/workdir');
-      expect(engine.getQueueDepth(sessionKey)).toBe(0);
+      expect(queueDepth(engine, sessionKey)).toBe(0);
     });
 
     it('cleans up queue depth when all sessions for chat are closed', async () => {
@@ -236,7 +220,7 @@ describe('SDKEngine', () => {
       await engine.sendWithContext('feishu', 'chat-1', 'queued');
 
       engine.closeSession('feishu', 'chat-1'); // Close all sessions for chat
-      expect(engine.getQueueDepth(DEFAULT_SESSION_KEY)).toBe(0);
+      expect(queueDepth(engine, DEFAULT_SESSION_KEY)).toBe(0);
     });
 
     it('decrements queue depth as queued turns are consumed', async () => {
@@ -248,10 +232,10 @@ describe('SDKEngine', () => {
       await engine.sendWithContext('feishu', 'chat-1', 'message 2');
 
       mockSession.__triggerTurnComplete();
-      expect(engine.getQueueDepth(DEFAULT_SESSION_KEY)).toBe(1);
+      expect(queueDepth(engine, DEFAULT_SESSION_KEY)).toBe(1);
 
       mockSession.__triggerTurnComplete();
-      expect(engine.getQueueDepth(DEFAULT_SESSION_KEY)).toBe(0);
+      expect(queueDepth(engine, DEFAULT_SESSION_KEY)).toBe(0);
     });
   });
 
@@ -262,8 +246,22 @@ describe('SDKEngine', () => {
 
       const session = createEngineSession(engine, mockProvider);
 
-      expect(session).toBeDefined();
-      expect(mockProvider.createSession).toHaveBeenCalled();
+      expect(session).toBe(mockSession);
+      expect(mockProvider.createSession).toHaveBeenCalledWith(expect.objectContaining({
+        workingDirectory: '/workdir',
+      }));
+      expect(engine.getActiveSessionKey('feishu', 'chat-1')).toBe(DEFAULT_SESSION_KEY);
+      expect(engine.hasActiveSession('feishu', 'chat-1', '/workdir')).toBe(true);
+      expect(engine.getSessionsForChat('feishu', 'chat-1')).toMatchObject([
+        {
+          sessionKey: DEFAULT_SESSION_KEY,
+          workdir: '/workdir',
+          isAlive: true,
+          isTurnActive: false,
+          bindingSessionId: DEFAULT_SESSION_ID,
+          isCurrent: true,
+        },
+      ]);
     });
 
     it('returns existing session if alive', () => {
@@ -337,10 +335,35 @@ describe('SDKEngine', () => {
       expect(engine.getSessionForBubble('bubble-1')).toBe(newKey);
       expect(engine.getActiveSessionKey('feishu', 'chat-1')).toBeUndefined();
       expect(engine.getActiveSessionKey('feishu', 'chat-1#thread:thread-1')).toBe(newKey);
-      expect(engine.getQueueDepth('feishu:chat-1:session-1')).toBe(0);
-      expect(engine.getQueueDepth(newKey!)).toBe(1);
+      expect(queueDepth(engine, 'feishu:chat-1:session-1')).toBe(0);
+      expect(queueDepth(engine, newKey!)).toBe(1);
       expect(engine.getSessionsForChat('feishu', 'chat-1')).toHaveLength(0);
       expect(engine.getSessionsForChat('feishu', 'chat-1#thread:thread-1')[0].sessionKey).toBe(newKey);
+    });
+  });
+
+  describe('file delivery routes', () => {
+    it('resolves file delivery tokens without consuming them', () => {
+      const token = engine.registerFileDeliveryRoute(
+        DEFAULT_SESSION_KEY,
+        {
+          channelType: 'feishu',
+          chatId: 'chat-1',
+          scopeId: 'chat-1',
+        },
+        '/workdir',
+      );
+
+      expect(engine.resolveFileDeliveryToken(token)).toMatchObject({
+        chatId: 'chat-1',
+        cwd: '/workdir',
+        sessionKey: DEFAULT_SESSION_KEY,
+      });
+      expect(engine.resolveFileDeliveryToken(token)).toMatchObject({
+        chatId: 'chat-1',
+        cwd: '/workdir',
+        sessionKey: DEFAULT_SESSION_KEY,
+      });
     });
   });
 });

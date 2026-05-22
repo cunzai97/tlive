@@ -51,6 +51,79 @@ function normalizeRequestedVersion(version) {
   return trimmed.replace(/^v/i, '');
 }
 
+function isPrereleaseVersion(version) {
+  return Boolean(normalizeRequestedVersion(version)?.includes('-'));
+}
+
+function parseVersion(version) {
+  const [core, prerelease = ''] = normalizeRequestedVersion(version)?.split('-', 2) || ['0.0.0', ''];
+  const [major = 0, minor = 0, patch = 0] = core.split('.').map((part) => Number.parseInt(part, 10) || 0);
+  return { major, minor, patch, prerelease: prerelease ? prerelease.split('.') : [] };
+}
+
+function comparePrerelease(aParts, bParts) {
+  if (!aParts.length && !bParts.length) return 0;
+  if (!aParts.length) return 1;
+  if (!bParts.length) return -1;
+  const len = Math.max(aParts.length, bParts.length);
+  for (let i = 0; i < len; i++) {
+    const a = aParts[i];
+    const b = bParts[i];
+    if (a === undefined) return -1;
+    if (b === undefined) return 1;
+    const aNum = /^\d+$/.test(a) ? Number.parseInt(a, 10) : null;
+    const bNum = /^\d+$/.test(b) ? Number.parseInt(b, 10) : null;
+    if (aNum !== null && bNum !== null && aNum !== bNum) return aNum - bNum;
+    if (aNum !== null && bNum === null) return -1;
+    if (aNum === null && bNum !== null) return 1;
+    if (a !== b) return a < b ? -1 : 1;
+  }
+  return 0;
+}
+
+function compareVersions(a, b) {
+  const aVersion = parseVersion(a);
+  const bVersion = parseVersion(b);
+  if (aVersion.major !== bVersion.major) return aVersion.major - bVersion.major;
+  if (aVersion.minor !== bVersion.minor) return aVersion.minor - bVersion.minor;
+  if (aVersion.patch !== bVersion.patch) return aVersion.patch - bVersion.patch;
+  return comparePrerelease(aVersion.prerelease, bVersion.prerelease);
+}
+
+function releaseVersion(release) {
+  return normalizeRequestedVersion(release?.tag_name || release?.name);
+}
+
+function selectUpdateRelease(current, releases) {
+  const currentIsPrerelease = isPrereleaseVersion(current);
+  return releases
+    .filter((release) => !release?.draft)
+    .filter((release) => {
+      const version = releaseVersion(release);
+      if (!version) return false;
+      if (!currentIsPrerelease && release.prerelease) return false;
+      return compareVersions(current, version) < 0;
+    })
+    .sort((a, b) => compareVersions(releaseVersion(b), releaseVersion(a)))[0] || null;
+}
+
+async function fetchLatestReleaseForChannel(current) {
+  const currentIsPrerelease = isPrereleaseVersion(current);
+  const url = currentIsPrerelease
+    ? `https://api.github.com/repos/${REPO}/releases?per_page=30`
+    : `https://api.github.com/repos/${REPO}/releases/latest`;
+  const resp = await fetch(url, {
+    headers: { 'Accept': 'application/vnd.github.v3+json' },
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!resp.ok) {
+    throw new Error(`GitHub API returned ${resp.status}`);
+  }
+  const data = await resp.json();
+  if (!currentIsPrerelease) return data;
+  return selectUpdateRelease(current, data) || { tag_name: `v${current}`, name: `v${current}` };
+}
+
 function toReleaseTag(version) {
   const normalized = normalizeRequestedVersion(version);
   if (!normalized) {
@@ -543,75 +616,6 @@ function getDailyLogPath(baseName, date = new Date()) {
   return join(LOG_DIR, `${baseName}-${year}-${month}-${day}.log`);
 }
 
-// ---------------------------------------------------------------------------
-// Doctor
-// ---------------------------------------------------------------------------
-
-async function runDoctor() {
-  console.log('=== TLive Doctor ===\n');
-
-  // Dependencies
-  console.log('Dependencies:');
-
-  console.log(`  node:    ${process.version}`);
-
-  const checkCmd = (name) => {
-    try {
-      const r = spawnSync(isWindows ? 'where' : 'which', [name], { encoding: 'utf-8', timeout: 5000 });
-      return r.status === 0;
-    } catch { return false; }
-  };
-
-  const gitVersion = (() => {
-    try {
-      const r = spawnSync('git', ['--version'], { encoding: 'utf-8', timeout: 5000 });
-      return r.status === 0 ? r.stdout.trim().split('\n')[0] : null;
-    } catch { return null; }
-  })();
-
-  console.log(checkCmd('curl') ? '  curl:    OK' : '  curl:    NOT FOUND (optional)');
-  console.log(checkCmd('jq') ? '  jq:      OK' : '  jq:      NOT FOUND (optional)');
-  console.log(gitVersion ? `  git:     ${gitVersion}` : '  git:     NOT FOUND');
-
-  console.log('');
-
-  // Config
-  console.log('Config:');
-  if (existsSync(CONFIG_FILE)) {
-    console.log('  config.env: OK');
-    const config = loadConfigEnv();
-    console.log(config.TL_TOKEN ? '  TL_TOKEN: set' : '  TL_TOKEN: NOT SET');
-    console.log(
-      config.TL_FS_APP_ID && config.TL_FS_APP_SECRET
-        ? '  Feishu:   configured'
-        : '  Feishu:   not configured',
-    );
-  } else {
-    console.log("  config.env: NOT FOUND (run 'tlive setup')");
-  }
-
-  console.log('');
-
-  // Processes
-  console.log('Processes:');
-  const bridgePid = getBridgePid();
-  console.log(bridgePid ? `  Bridge:   running (PID ${bridgePid})` : '  Bridge:   not running');
-
-  // Show active sessions count
-  const bindingsFile = join(TLIVE_HOME, 'data', 'bindings.json');
-  try {
-    const bindings = JSON.parse(readFileSync(bindingsFile, 'utf-8'));
-    const count = Object.values(bindings).filter(binding => binding?.channelType === 'feishu').length;
-    console.log(count > 0 ? `  Sessions: ${count} active` : '  Sessions: none');
-  } catch {
-    console.log('  Sessions: (no data)');
-  }
-
-  console.log('');
-
-  console.log('\n=== Done ===');
-}
-
 const HELP_TEXT = `TLive — Terminal live monitoring + IM bridge for AI coding tools
 
 Usage:
@@ -627,7 +631,6 @@ Service Management:
   tlive restart              Restart IM Bridge daemon
   tlive status               Show Bridge status
   tlive logs [N]             Show last N log lines (default: 50)
-  tlive doctor               Run diagnostic checks
   tlive upgrade [version]    Upgrade to latest or specified version
   tlive version              Show version info
 
@@ -641,10 +644,9 @@ In Claude Code (AI-guided):
   /tlive                     Start Bridge (with pre-checks)
   /tlive setup               Interactive setup wizard
   /tlive reconfigure         Modify specific config fields
-  /tlive doctor              Diagnose issues + suggest fixes
 `;
 
-const NODE_COMMANDS = new Set(['setup', 'start', 'stop', 'restart', 'status', 'logs', 'doctor', 'version', 'update', 'upgrade']);
+const NODE_COMMANDS = new Set(['setup', 'start', 'stop', 'restart', 'status', 'logs', 'version', 'update', 'upgrade']);
 const CORE_COMMANDS = new Set(['install']);
 
 function run(cmd, opts = {}) {
@@ -718,29 +720,19 @@ switch (command) {
     daemonLogs(parseInt(args[0], 10) || 50);
     break;
 
-  case 'doctor':
-    await runDoctor();
-    break;
-
   case 'version': {
     const ver = getVersion();
     console.log(`tlive          ${ver}`);
     console.log(`node           ${process.version}`);
     // Check for updates
     try {
-      const resp = await fetch('https://api.github.com/repos/huanghuoguoguo/tlive/releases/latest', {
-        headers: { 'Accept': 'application/vnd.github.v3+json' },
-        signal: AbortSignal.timeout(5000),
-      });
-      if (resp.ok) {
-        const data = await resp.json();
-        const latest = data.tag_name?.replace(/^v/, '') || data.name?.replace(/^v/, '');
-        if (latest && latest !== ver) {
-          console.log(`\nUpdate available: ${ver} → ${latest}`);
-          console.log('Run: tlive update');
-        } else {
-          console.log('\nUp to date.');
-        }
+      const data = await fetchLatestReleaseForChannel(ver);
+      const latest = releaseVersion(data);
+      if (latest && compareVersions(ver, latest) < 0) {
+        console.log(`\nUpdate available: ${ver} → ${latest}`);
+        console.log('Run: tlive update');
+      } else {
+        console.log('\nUp to date.');
       }
     } catch {}
     break;
@@ -759,15 +751,8 @@ switch (command) {
     let latest = requestedVersion;
     if (!latest) {
       try {
-        const resp = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, {
-          headers: { 'Accept': 'application/vnd.github.v3+json' },
-          signal: AbortSignal.timeout(10000),
-        });
-        if (!resp.ok) {
-          throw new Error(`GitHub API returned ${resp.status}`);
-        }
-        const data = await resp.json();
-        latest = normalizeRequestedVersion(data.tag_name || data.name);
+        const data = await fetchLatestReleaseForChannel(current);
+        latest = releaseVersion(data);
         if (!latest) {
           throw new Error('Latest version not found in release metadata');
         }
@@ -981,7 +966,7 @@ switch (command) {
 
   default: {
     // Check for typos of known commands before failing
-    const known = ['setup', 'start', 'stop', 'restart', 'status', 'logs', 'doctor', 'install', 'help', 'version', 'update', 'upgrade'];
+    const known = ['setup', 'start', 'stop', 'restart', 'status', 'logs', 'install', 'help', 'version', 'update', 'upgrade'];
     const similar = known.find(k => {
       if (Math.abs(k.length - command.length) > 2) return false;
       let diff = 0;

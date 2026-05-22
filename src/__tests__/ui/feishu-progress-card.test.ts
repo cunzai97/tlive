@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { FeishuFormatter } from '../../channels/feishu/formatter.js';
-import type { ProgressData, SessionsData } from '../../formatting/message-types.js';
+import type { ProgressData } from '../../formatting/message-types.js';
+import { actionCallback } from '../../core/callbacks.js';
 
 function createProgressData(overrides: Partial<ProgressData> = {}): ProgressData {
   return {
@@ -14,27 +15,9 @@ function createProgressData(overrides: Partial<ProgressData> = {}): ProgressData
   };
 }
 
-function createSessionsData(overrides: Partial<SessionsData> = {}): SessionsData {
-  return {
-    sessions: [
-      { index: 1, date: '2026-04-14 10:00', cwd: '/home/user/workspace', size: '1.2KB', preview: 'session 1 preview', isCurrent: true },
-      { index: 2, date: '2026-04-13 15:30', cwd: '/home/user/workspace', size: '800B', preview: 'session 2 preview', isCurrent: false },
-      { index: 3, date: '2026-04-12 09:00', cwd: '/home/user/other', size: '2.1KB', preview: 'session 3 preview', isCurrent: false },
-      { index: 4, date: '2026-04-11 08:00', cwd: '/home/user/old', size: '500B', preview: 'session 4 preview', isCurrent: false },
-    ],
-    filterHint: '',
-    ...overrides,
-  };
-}
-
 /** Extract Feishu card elements from a rendered message. */
 function getElements(msg: ReturnType<FeishuFormatter['formatProgress']>): any[] {
   return (msg as any).feishuElements ?? [];
-}
-
-/** Extract Feishu card header from a rendered message. */
-function getHeader(msg: ReturnType<FeishuFormatter['formatProgress']>): any {
-  return (msg as any).feishuHeader;
 }
 
 /** Find all elements with a given tag */
@@ -60,7 +43,10 @@ function findButtons(elements: any[]): any[] {
 
 function findFooterPanel(elements: any[], footerText: string): any | undefined {
   return findByTag(elements, 'collapsible_panel')
-    .find(panel => panel.header?.title?.content?.includes(footerText));
+    .find(panel =>
+      panel.header?.title?.content === '运行信息' &&
+      (panel.elements ?? []).some((element: any) => element.content?.includes(footerText)),
+    );
 }
 
 describe('FeishuFormatter.formatQuestion', () => {
@@ -89,26 +75,27 @@ describe('FeishuFormatter.formatQuestion', () => {
     });
 
     const formElements = getFormElements(msg as any);
-    const selectStatic = formElements.find(e => e.tag === 'select_static');
-    expect(selectStatic).toBeDefined();
-    expect(selectStatic!.name).toBe('_select');
-    expect(selectStatic!.options).toHaveLength(5);
+    expect(formElements).toContainEqual(expect.objectContaining({
+      tag: 'select_static',
+      name: '_select',
+      options: expect.arrayContaining([
+        expect.objectContaining({ text: { tag: 'plain_text', content: 'Option A' } }),
+        expect.objectContaining({ text: { tag: 'plain_text', content: 'Option E' } }),
+      ]),
+    }));
+    expect(formElements).toContainEqual(expect.objectContaining({
+      tag: 'input',
+      name: '_text_answer',
+    }));
 
-    // Should have input for free text
-    const input = formElements.find(e => e.tag === 'input' && e.name === '_text_answer');
-    expect(input).toBeDefined();
-
-    // Submit button with form_action_type: submit (embedded in column_set inside form)
-    const columnSets = formElements.filter(e => e.tag === 'column_set');
-    expect(columnSets.length).toBeGreaterThan(0);
-    const submitBtn = columnSets[0]?.columns?.[0]?.elements?.[0];
-    expect(submitBtn?.tag).toBe('button');
-    expect(submitBtn?.form_action_type).toBe('submit');
-    // permId comes from button name (derived from callbackData)
-    expect(submitBtn?.name).toBe('test-123');
+    const submitBtn = findButtons(formElements).find(button => button.form_action_type === 'submit');
+    expect(submitBtn).toMatchObject({
+      name: 'test-123',
+      form_action_type: 'submit',
+    });
   });
 
-  it('uses buttons for few options', () => {
+  it('uses exact option callbacks for few options', () => {
     const msg = formatter.formatQuestion('chat1', {
       question: '同意吗？',
       options: [
@@ -125,181 +112,22 @@ describe('FeishuFormatter.formatQuestion', () => {
     expect(selectStatic).toBeUndefined();
 
     // Should have input for free text
-    const input = formElements.find(e => e.tag === 'input' && e.name === '_text_answer');
-    expect(input).toBeDefined();
+    expect(formElements).toContainEqual(expect.objectContaining({
+      tag: 'input',
+      name: '_text_answer',
+    }));
 
-    // Buttons inside column_set inside form - find any button with callback behavior
-    const columnSets = formElements.filter(e => e.tag === 'column_set');
-    expect(columnSets.length).toBeGreaterThan(0);
+    const actions = findButtons(formElements)
+      .map((button) => button.behaviors?.[0]?.value?.action)
+      .filter(Boolean);
+    expect(actions).toEqual([
+      'perm:allow:test-456:askq:0',
+      'perm:allow:test-456:askq:1',
+      'askq_skip:test-456:sdk',
+    ]);
 
-    // Find all buttons across all column_sets
-    const allButtons: any[] = [];
-    for (const cs of columnSets) {
-      for (const col of cs.columns || []) {
-        for (const el of col.elements || []) {
-          if (el.tag === 'button') allButtons.push(el);
-        }
-      }
-    }
-    expect(allButtons.length).toBeGreaterThan(0);
-
-    // At least one button should have callback behavior (option buttons)
-    const callbackBtn = allButtons.find(b => b.behaviors?.[0]?.value?.action?.includes('askq'));
-    expect(callbackBtn).toBeDefined();
-  });
-
-  it('permId is embedded in submit button name', () => {
-    const msg = formatter.formatQuestion('chat1', {
-      question: 'Test',
-      options: [{ label: 'A' }],
-      multiSelect: false,
-      permId: 'perm-xyz',
-      sessionId: 'sdk',
-    });
-
-    const formElements = getFormElements(msg as any);
-    // No hidden input - permId comes from submit button
-    const hiddenInput = formElements.find(e => e.tag === 'input' && e.name === '_interaction_id');
-    expect(hiddenInput).toBeUndefined();
-
-    // Find submit button and check its name contains permId
-    const columnSets = formElements.filter(e => e.tag === 'column_set');
-    for (const cs of columnSets) {
-      for (const col of cs.columns || []) {
-        for (const el of col.elements || []) {
-          if (el.tag === 'button' && el.form_action_type === 'submit') {
-            expect(el.name).toBe('perm-xyz');
-            return;
-          }
-        }
-      }
-    }
-  });
-
-  it('uses form container for all components', () => {
-    const msg = formatter.formatQuestion('chat1', {
-      question: 'Test question',
-      options: [{ label: 'A' }, { label: 'B' }],
-      multiSelect: false,
-      permId: 'test-789',
-      sessionId: 'sdk',
-    });
-
-    const elements = getElements(msg as any);
-    const formContainer = elements.find(e => e.tag === 'form');
-    expect(formContainer).toBeDefined();
-    expect(formContainer!.name).toContain('form_');
-  });
-});
-
-describe('FeishuFormatter.formatSessions', () => {
-  const formatter = new FeishuFormatter('zh');
-
-  it('uses collapsible panels for each session', () => {
-    const msg = formatter.formatSessions('chat1', createSessionsData());
-    const elements = getElements(msg as any);
-
-    const panels = findByTag(elements, 'collapsible_panel');
-    expect(panels.length).toBe(4); // 4 sessions
-  });
-
-  it('toggle button is at top (column_set)', () => {
-    const msg = formatter.formatSessions('chat1', createSessionsData({ showAll: false }));
-    const elements = getElements(msg as any);
-
-    // First element after title markdown should be column_set with toggle button
-    const columnSets = findByTag(elements, 'column_set');
-    expect(columnSets.length).toBeGreaterThan(0);
-
-    // Find toggle button
-    const firstColSet = columnSets[0];
-    const toggleBtn = firstColSet?.columns?.[0]?.elements?.[0];
-    expect(toggleBtn?.tag).toBe('button');
-    expect(toggleBtn?.text?.content).toContain('所有会话');
-  });
-
-  it('current session panel is expanded by default', () => {
-    const msg = formatter.formatSessions('chat1', createSessionsData());
-    const elements = getElements(msg as any);
-
-    const panels = findByTag(elements, 'collapsible_panel');
-    const currentPanel = panels.find(p => p.header?.title?.content?.includes('◀ 当前'));
-    expect(currentPanel?.expanded).toBe(true);
-
-    const otherPanels = panels.filter(p => !p.header?.title?.content?.includes('◀ 当前'));
-    for (const p of otherPanels) {
-      expect(p.expanded).toBe(false);
-    }
-  });
-
-  it('switch button inside panel for all sessions', () => {
-    const msg = formatter.formatSessions('chat1', createSessionsData());
-    const elements = getElements(msg as any);
-
-    const panels = findByTag(elements, 'collapsible_panel');
-
-    // All panels should have switch button inside
-    for (let i = 0; i < panels.length; i++) {
-      const panel = panels[i];
-      const panelElements = panel.elements || [];
-      const columnSets = panelElements.filter((e: any) => e.tag === 'column_set');
-      expect(columnSets.length).toBeGreaterThan(0);
-
-      const btn = columnSets[0]?.columns?.[0]?.elements?.[0];
-      expect(btn?.tag).toBe('button');
-      expect(btn?.text?.content).toContain(`切换到 #${i + 1}`);
-    }
-  });
-
-  it('recent sessions mode (showAll=false) hides cwd in panel', () => {
-    const msg = formatter.formatSessions('chat1', createSessionsData({ showAll: false }));
-    const elements = getElements(msg as any);
-
-    const panels = findByTag(elements, 'collapsible_panel');
-    const panelContent = (panels[0]?.elements || []).find((e: any) => e.tag === 'markdown')?.content || '';
-
-    // Should NOT show cwd in recent mode panel content
-    expect(panelContent).not.toContain('**目录**');
-  });
-
-  it('all sessions mode (showAll=true) shows cwd in panel', () => {
-    const msg = formatter.formatSessions('chat1', createSessionsData({ showAll: true }));
-    const elements = getElements(msg as any);
-
-    const panels = findByTag(elements, 'collapsible_panel');
-    const panelContent = (panels[0]?.elements || []).find((e: any) => e.tag === 'markdown')?.content || '';
-
-    // Should show cwd in all mode panel content
-    expect(panelContent).toContain('**目录**');
-  });
-
-  it('toggle button switches correctly', () => {
-    // Recent mode → shows "所有会话" button
-    const msgRecent = formatter.formatSessions('chat1', createSessionsData({ showAll: false }));
-    const elementsRecent = getElements(msgRecent as any);
-    const colSetsRecent = findByTag(elementsRecent, 'column_set');
-    const toggleBtnRecent = colSetsRecent[0]?.columns?.[0]?.elements?.[0];
-    expect(toggleBtnRecent?.behaviors?.[0]?.value?.action).toBe('cmd:session --all');
-
-    // All mode → shows "最近会话" button
-    const msgAll = formatter.formatSessions('chat1', createSessionsData({ showAll: true }));
-    const elementsAll = getElements(msgAll as any);
-    const colSetsAll = findByTag(elementsAll, 'column_set');
-    const toggleBtnAll = colSetsAll[0]?.columns?.[0]?.elements?.[0];
-    expect(toggleBtnAll?.behaviors?.[0]?.value?.action).toBe('cmd:session');
-  });
-
-  it('form input at bottom for arbitrary session number', () => {
-    const msg = formatter.formatSessions('chat1', createSessionsData());
-    const elements = getElements(msg as any);
-
-    const formContainer = elements.find(e => e.tag === 'form');
-    expect(formContainer).toBeDefined();
-    expect(formContainer!.name).toBe('form_session_select');
-
-    const formElements = formContainer!.elements || [];
-    const input = formElements.find((e: any) => e.tag === 'input' && e.name === '_session_idx');
-    expect(input).toBeDefined();
+    const submit = findButtons(formElements).find((button) => button.form_action_type === 'submit');
+    expect(submit).toMatchObject({ name: 'test-456', form_action_type: 'submit' });
   });
 });
 
@@ -321,48 +149,21 @@ describe('FeishuFormatter.formatProgress', () => {
 
       // Should contain the response text
       expect(allText).toContain('Hello! How can I help?');
-      // Footer is rendered as a collapsed panel title, with the home button inside.
+      // Footer is rendered inside a collapsed run-info panel, with the home button inside.
       const footerPanel = findFooterPanel(elements, '~/workspace');
-      expect(footerPanel).toBeDefined();
-      expect(footerPanel.expanded).toBe(false);
-      expect(findButtons([footerPanel]).map(b => b.behaviors?.[0]?.value?.action)).toEqual(['cmd:home']);
+      expect(footerPanel).toMatchObject({
+        expanded: false,
+        header: { title: { content: '运行信息' } },
+      });
+      expect(findButtons([footerPanel]).map(b => b.behaviors?.[0]?.value?.action)).toEqual([
+        actionCallback('home'),
+      ]);
       // Should NOT contain verbose status fields
       expect(allText).not.toContain('**任务**');
       expect(allText).not.toContain('**当前阶段**');
       expect(allText).not.toContain('**运行时长**');
     });
 
-    it('uses green header for completed', () => {
-      const msg = formatter.formatProgress('chat1', createProgressData({ phase: 'completed' }));
-      const header = getHeader(msg);
-      expect(header.template).toBe('green');
-      expect(header.title).toContain('已完成');
-    });
-
-    it('uses red header for failed', () => {
-      const msg = formatter.formatProgress('chat1', createProgressData({ phase: 'failed' }));
-      const header = getHeader(msg);
-      expect(header.template).toBe('red');
-    });
-
-    it('defaults completed action buttons to workbench only', () => {
-      const msg = formatter.formatProgress('chat1', createProgressData({ phase: 'completed' }));
-      const buttons = findButtons(getElements(msg));
-      const actions = buttons.map(b => b.behaviors?.[0]?.value?.action).filter(Boolean);
-
-      expect(actions).toEqual(['cmd:home']);
-    });
-
-    it('uses configured completed action buttons', () => {
-      const customFormatter = new FeishuFormatter('zh', {
-        doneButtons: ['home', 'sessions', 'new', 'help'],
-      });
-      const msg = customFormatter.formatProgress('chat1', createProgressData({ phase: 'completed' }));
-      const buttons = findButtons(getElements(msg));
-      const actions = buttons.map(b => b.behaviors?.[0]?.value?.action).filter(Boolean);
-
-      expect(actions).toEqual(['cmd:home', 'cmd:session', 'cmd:new', 'cmd:help']);
-    });
   });
 
   describe('executing phase — shows status info', () => {
@@ -421,9 +222,8 @@ describe('FeishuFormatter.formatProgress', () => {
       }));
 
       const panels = findByTag(getElements(msg), 'collapsible_panel');
-      expect(panels.length).toBeGreaterThan(0);
       const latestPanel = panels[panels.length - 1];
-      expect(latestPanel.expanded).toBe(true);
+      expect(latestPanel).toMatchObject({ expanded: true });
       expect(latestPanel.header.title.content).toContain('步骤三');
       expect(latestPanel.elements[0].content).toContain('src/c.ts');
     });
@@ -451,6 +251,25 @@ describe('FeishuFormatter.formatProgress', () => {
       expect(elements[1].content).toContain('Final answer');
     });
 
+    it('keeps pre-tool narration in the operation panel and final text in the body', () => {
+      const msg = formatter.formatProgress('chat1', createProgressData({
+        phase: 'completed',
+        renderedText: 'I will inspect the branch.\nThe current branch is feat/codex-provider-ux.',
+        timeline: [
+          { kind: 'text', text: 'I will inspect the branch.' },
+          { kind: 'tool', toolName: 'Bash', toolInput: 'git branch --show-current', toolResult: 'feat/codex-provider-ux' },
+          { kind: 'text', text: 'The current branch is feat/codex-provider-ux.' },
+        ],
+      }));
+
+      const elements = getElements(msg);
+      expect(elements[0].tag).toBe('collapsible_panel');
+      expect(elements[0].elements[0].content).toContain('I will inspect the branch.');
+      const body = findByTag(elements, 'markdown').map(e => e.content).join('\n');
+      expect(body).toContain('The current branch is feat/codex-provider-ux.');
+      expect(body).not.toContain('I will inspect the branch.');
+    });
+
     it('starts a new operation panel when a new thinking step appears after tools', () => {
       const msg = formatter.formatProgress('chat1', createProgressData({
         phase: 'completed',
@@ -467,7 +286,7 @@ describe('FeishuFormatter.formatProgress', () => {
 
       const elements = getElements(msg);
       const panels = findByTag(elements, 'collapsible_panel');
-      const operationPanels = panels.filter(panel => !panel.header?.title?.content?.includes('[glm-5]'));
+      const operationPanels = panels.filter(panel => panel.header?.title?.content !== '运行信息');
       expect(operationPanels).toHaveLength(2);
 
       const firstPanel = operationPanels[0];
@@ -481,8 +300,13 @@ describe('FeishuFormatter.formatProgress', () => {
       expect(secondPanel.elements[0].content).toContain('显示磁盘使用情况表格。');
 
       const footerPanel = findFooterPanel(elements, '[glm-5]');
-      expect(footerPanel).toBeDefined();
-      expect(findButtons([footerPanel]).map(b => b.behaviors?.[0]?.value?.action)).toEqual(['cmd:home']);
+      expect(footerPanel).toMatchObject({
+        expanded: false,
+        header: { title: { content: '运行信息' } },
+      });
+      expect(findButtons([footerPanel]).map(b => b.behaviors?.[0]?.value?.action)).toEqual([
+        actionCallback('home'),
+      ]);
 
       const markdowns = findByTag(elements, 'markdown').map(e => e.content).join('\n');
       expect(markdowns).toContain('Final answer');
@@ -500,12 +324,13 @@ describe('FeishuFormatter.formatProgress', () => {
       const elements = getElements(msg);
       const panels = findByTag(elements, 'collapsible_panel');
 
-      expect(panels.length).toBeGreaterThanOrEqual(1);
       const thinkingPanel = panels.find(p => p.header?.title?.content?.includes('思考'));
-      expect(thinkingPanel).toBeDefined();
+      expect(thinkingPanel).toMatchObject({
+        expanded: false,
+        elements: [expect.objectContaining({ tag: 'markdown' })],
+      });
 
       // Correct: uses elements array directly
-      expect(thinkingPanel.elements).toBeDefined();
       expect(Array.isArray(thinkingPanel.elements)).toBe(true);
       expect(thinkingPanel.elements[0].tag).toBe('markdown');
       expect(thinkingPanel.elements[0].content).toContain('Let me think');
@@ -531,9 +356,10 @@ describe('FeishuFormatter.formatProgress', () => {
       const panels = findByTag(elements, 'collapsible_panel');
       const toolPanel = panels.find(p => p.header?.title?.content?.includes('工具'));
 
-      expect(toolPanel).toBeDefined();
+      expect(toolPanel).toMatchObject({
+        elements: [expect.objectContaining({ tag: 'markdown' })],
+      });
       // Correct structure
-      expect(toolPanel.elements).toBeDefined();
       expect(Array.isArray(toolPanel.elements)).toBe(true);
       expect(toolPanel.body).toBeUndefined();
 
@@ -587,8 +413,11 @@ describe('FeishuFormatter.formatProgress', () => {
       expect(markdowns).not.toContain('Final answer');
       expect(markdowns).not.toContain('~/workspace/tlive');
       const panels = findByTag(elements, 'collapsible_panel');
-      expect(panels.filter(panel => !panel.header?.title?.content?.includes('[glm-5]'))).toHaveLength(1);
-      expect(findFooterPanel(elements, '[glm-5]')).toBeDefined();
+      expect(panels.filter(panel => panel.header?.title?.content !== '运行信息')).toHaveLength(1);
+      expect(findFooterPanel(elements, '[glm-5]')).toMatchObject({
+        expanded: false,
+        header: { title: { content: '运行信息' } },
+      });
     });
   });
 

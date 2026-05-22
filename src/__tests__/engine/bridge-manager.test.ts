@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { BridgeManager } from '../../engine/coordinators/bridge-manager.js';
-import { initBridgeContext } from '../../context.js';
 import type { BaseChannelAdapter } from '../../channels/base.js';
 import type { RenderedMessage } from '../../channels/types.js';
 import type { FormattableMessage } from '../../formatting/message-types.js';
@@ -50,6 +49,8 @@ function mockAdapter(channelType = 'feishu'): BaseChannelAdapter {
 
 describe('BridgeManager', () => {
   let manager: BridgeManager;
+  let store: any;
+  let llm: any;
 
   beforeEach(() => {
     // Set required env vars for loadConfig validation
@@ -60,49 +61,23 @@ describe('BridgeManager', () => {
     process.env.TL_WEBHOOK_ENABLED = 'true';
     process.env.TL_WEBHOOK_TOKEN = 'test-webhook-token';
     process.env.TL_WEBHOOK_PORT = '0';
-    initBridgeContext({
-      defaultWorkdir: '/tmp',
-      store: {
-        acquireLock: vi.fn().mockResolvedValue(true),
-        renewLock: vi.fn().mockResolvedValue(true),
-        releaseLock: vi.fn(),
-        getBinding: vi.fn().mockResolvedValue({ channelType: 'feishu', chatId: 'c1', sessionId: 's1', createdAt: '' }),
-        saveBinding: vi.fn(), deleteBinding: vi.fn(), listBindings: vi.fn().mockResolvedValue([]),
-        isDuplicate: vi.fn().mockResolvedValue(false), markProcessed: vi.fn(),
-      } as any,
-      llm: {
-        streamChat: () => ({
-          stream: new ReadableStream({
-            start(c) { c.enqueue({ kind: 'text_delta', text: 'reply' }); c.enqueue({ kind: 'query_result', sessionId: 's1', isError: false, usage: { inputTokens: 0, outputTokens: 0 } }); c.close(); }
-          }),
-          controls: undefined,
+    store = {
+      acquireLock: vi.fn().mockResolvedValue(true),
+      releaseLock: vi.fn(),
+      getBinding: vi.fn().mockResolvedValue({ channelType: 'feishu', chatId: 'c1', sessionId: 's1', createdAt: '' }),
+      getBindingBySessionId: vi.fn().mockResolvedValue({ channelType: 'feishu', chatId: 'c1', sessionId: 's1', createdAt: '' }),
+      saveBinding: vi.fn(),
+      listBindings: vi.fn().mockResolvedValue([]),
+    };
+    llm = {
+      streamChat: () => ({
+        stream: new ReadableStream({
+          start(c) { c.enqueue({ kind: 'text_delta', text: 'reply' }); c.enqueue({ kind: 'query_result', sessionId: 's1', isError: false, usage: { inputTokens: 0, outputTokens: 0 } }); c.close(); }
         }),
-      } as any,
-    });
-    manager = new BridgeManager();
-  });
-
-  it('starts adapters', async () => {
-    const adapter = mockAdapter();
-    manager.registerAdapter(adapter);
-    await manager.start();
-    expect(adapter.start).toHaveBeenCalled();
-  });
-
-  it('stops adapters', async () => {
-    const adapter = mockAdapter();
-    manager.registerAdapter(adapter);
-    await manager.start();
-    await manager.stop();
-    expect(adapter.stop).toHaveBeenCalled();
-  });
-
-  it('skips adapters with invalid config', async () => {
-    const adapter = mockAdapter();
-    (adapter.validateConfig as any).mockReturnValue('missing token');
-    manager.registerAdapter(adapter);
-    await manager.start();
-    expect(adapter.start).not.toHaveBeenCalled();
+        controls: undefined,
+      }),
+    };
+    manager = new BridgeManager({ defaultWorkdir: '/tmp', store, llm });
   });
 
   it('filters unauthorized messages', async () => {
@@ -134,7 +109,6 @@ describe('BridgeManager', () => {
   it('drops menu events without a user-scoped chat even if another chat was recently active', async () => {
     const adapter = mockAdapter('feishu');
     manager.registerAdapter(adapter);
-    const store = (await import('../../context.js')).getBridgeContext().store as any;
     store.getBinding.mockResolvedValue(null);
     manager.getState().clearUserLastChat('u1');
     manager.getIngress().recordChat('feishu', 'other-users-chat');
@@ -188,39 +162,6 @@ describe('BridgeManager', () => {
       callbackData: 'perm:allow:missing', messageId: 'm1',
     });
     expect(handled).toBe(false);
-  });
-
-  it('routes /tlive command', async () => {
-    const adapter = mockAdapter();
-    manager.registerAdapter(adapter);
-
-    const handled = await manager.handleInboundMessage(adapter, {
-      channelType: 'feishu', chatId: 'c1', userId: 'u1', text: '/tlive', messageId: 'm1',
-    });
-    expect(handled).toBe(true);
-    expect(adapter.send).toHaveBeenCalled();
-  });
-
-  it('sends typing indicator on message', async () => {
-    const adapter = mockAdapter();
-    manager.registerAdapter(adapter);
-
-    await manager.handleInboundMessage(adapter, {
-      channelType: 'feishu', chatId: 'c1', userId: 'u1', text: 'hello', messageId: 'm1',
-    });
-
-    expect((adapter as any).sendTyping).toHaveBeenCalledWith('c1');
-  });
-
-  it('handles internal /new action with rebind', async () => {
-    const adapter = mockAdapter();
-    manager.registerAdapter(adapter);
-
-    await manager.handleInboundMessage(adapter, {
-      channelType: 'feishu', chatId: 'c1', userId: 'u1', text: '/new', internalCommand: true, messageId: 'm1',
-    });
-
-    expect(JSON.stringify((adapter.send as ReturnType<typeof vi.fn>).mock.calls[0][0])).toContain('新会话');
   });
 
   describe('error notification', () => {
@@ -295,7 +236,6 @@ describe('BridgeManager', () => {
     const adapter = mockAdapter();
     manager.registerAdapter(adapter);
 
-    const store = (await import('../../context.js')).getBridgeContext().store as any;
     const binding = {
       channelType: 'feishu',
       chatId: 'c1',
@@ -332,17 +272,6 @@ describe('BridgeManager', () => {
     expect(result.sessionId).toBe(binding.sessionId);
   });
 
-  it('updates /help text to omit removed commands', async () => {
-    const adapter = mockAdapter();
-    manager.registerAdapter(adapter);
-
-    await manager.handleInboundMessage(adapter, {
-      channelType: 'feishu', chatId: 'c1', userId: 'u1', text: '/help', messageId: 'm1',
-    });
-
-    expect(JSON.stringify((adapter.send as ReturnType<typeof vi.fn>).mock.calls[0][0])).not.toContain('verbose');
-  });
-
   it('expires session after 30 minutes of inactivity', async () => {
     vi.useFakeTimers();
     const adapter = mockAdapter();
@@ -358,7 +287,6 @@ describe('BridgeManager', () => {
     vi.advanceTimersByTime(31 * 60 * 1000);
 
     // Second message — should trigger rebind (new session)
-    const store = (await import('../../context.js')).getBridgeContext().store;
     const saveBindingSpy = vi.mocked(store.saveBinding);
     const callsBefore = saveBindingSpy.mock.calls.length;
 
@@ -371,41 +299,12 @@ describe('BridgeManager', () => {
     vi.useRealTimers();
   });
 
-  it('does not expire session within 30 minutes', async () => {
-    vi.useFakeTimers();
-    const adapter = mockAdapter();
-    manager.registerAdapter(adapter);
-
-    await manager.handleInboundMessage(adapter, {
-      channelType: 'feishu', chatId: 'c1', userId: 'u1', text: 'first', messageId: 'm1',
-    });
-
-    const store = (await import('../../context.js')).getBridgeContext().store;
-    const saveBindingSpy = vi.mocked(store.saveBinding);
-
-    // Advance only 10 minutes
-    vi.advanceTimersByTime(10 * 60 * 1000);
-    const callsBefore = saveBindingSpy.mock.calls.length;
-
-    await manager.handleInboundMessage(adapter, {
-      channelType: 'feishu', chatId: 'c1', userId: 'u1', text: 'second', messageId: 'm2',
-    });
-
-    // saveBinding may be called by onSdkSessionId (persisting SDK session),
-    // but should NOT have been called for rebind (no session expiry)
-    // Check that no rebind happened by verifying the binding's sessionId didn't change
-    const binding = await store.getBinding('feishu', 'c1');
-    expect(binding?.sessionId).toBeDefined();
-    vi.useRealTimers();
-  });
-
   it('clears typing interval on error', async () => {
     const adapter = mockAdapter();
     manager.registerAdapter(adapter);
 
     // Make processMessage throw
-    const ctx = (await import('../../context.js')).getBridgeContext();
-    (ctx.llm as any).streamChat = () => ({
+    llm.streamChat = () => ({
       stream: new ReadableStream({
         start(c) { c.enqueue({ kind: 'error', message: 'boom' }); c.close(); }
       }),
@@ -452,34 +351,4 @@ describe('BridgeManager', () => {
     );
   });
 
-  it('Feishu internal /help renders with buttons', async () => {
-    const adapter = mockAdapter('feishu');
-    manager.registerAdapter(adapter);
-
-    await manager.handleInboundMessage(adapter, {
-      channelType: 'feishu', chatId: 'c1', userId: 'u1', text: '/help', internalCommand: true, messageId: 'm1',
-    });
-
-    expect(adapter.send).toHaveBeenCalledWith(
-      expect.objectContaining({
-        feishuHeader: expect.any(Object),
-        feishuElements: expect.any(Array),
-      })
-    );
-  });
-
-  it('Feishu internal /new renders with header', async () => {
-    const adapter = mockAdapter('feishu');
-    manager.registerAdapter(adapter);
-
-    await manager.handleInboundMessage(adapter, {
-      channelType: 'feishu', chatId: 'c1', userId: 'u1', text: '/new', internalCommand: true, messageId: 'm1',
-    });
-
-    expect(adapter.send).toHaveBeenCalledWith(
-      expect.objectContaining({
-        feishuHeader: expect.any(Object),
-      })
-    );
-  });
 });

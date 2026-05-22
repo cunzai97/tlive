@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { JsonFileStore } from '../../store/json-file.js';
 import type { AgentSettingSource } from '../../config.js';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -15,6 +15,7 @@ describe('JsonFileStore', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
@@ -26,10 +27,8 @@ describe('JsonFileStore', () => {
     expect(got).toEqual(binding);
   });
 
-  it('deletes binding', async () => {
-    await store.saveBinding({ channelType: 'feishu', chatId: '123', sessionId: 's1', createdAt: '' });
-    await store.deleteBinding('feishu', '123');
-    expect(await store.getBinding('feishu', '123')).toBeNull();
+  it('returns null for missing binding', async () => {
+    expect(await store.getBinding('feishu', 'missing')).toBeNull();
   });
 
   it('persists sdkSessionId and cwd in binding', async () => {
@@ -49,11 +48,25 @@ describe('JsonFileStore', () => {
     expect(got?.agentSettingSources).toEqual(['user', 'project']);
   });
 
-  // Dedup
-  it('tracks processed messages', async () => {
-    expect(await store.isDuplicate('msg1')).toBe(false);
-    await store.markProcessed('msg1');
-    expect(await store.isDuplicate('msg1')).toBe(true);
+  it('finds bindings by internal or sdk session id', async () => {
+    const binding = {
+      channelType: 'feishu',
+      chatId: '123',
+      sessionId: 'internal-1',
+      sdkSessionId: 'sdk-1',
+      createdAt: '',
+    };
+    await store.saveBinding(binding);
+    expect(await store.getBindingBySessionId('internal-1')).toEqual(binding);
+    expect(await store.getBindingBySessionId('sdk-1')).toEqual(binding);
+  });
+
+  it('lists bindings', async () => {
+    const first = { channelType: 'feishu', chatId: '1', sessionId: 's1', createdAt: '' };
+    const second = { channelType: 'feishu', chatId: '2', sessionId: 's2', createdAt: '' };
+    await store.saveBinding(first);
+    await store.saveBinding(second);
+    expect(await store.listBindings()).toEqual(expect.arrayContaining([first, second]));
   });
 
   // Locks
@@ -65,8 +78,9 @@ describe('JsonFileStore', () => {
   });
 
   it('lock expires after TTL', async () => {
-    expect(await store.acquireLock('k1', 1)).toBe(true); // 1ms TTL
-    await new Promise(r => setTimeout(r, 10));
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1_000);
+    expect(await store.acquireLock('k1', 1)).toBe(true);
+    now.mockReturnValue(1_002);
     expect(await store.acquireLock('k1', 60000)).toBe(true); // expired
   });
 });
