@@ -3,9 +3,9 @@ import {
   presentHome,
   presentDiagnose,
   presentUpgradeCommand,
-} from '../../engine/messages/presenter.js';
-import { FeishuFormatter } from '../../channels/feishu/formatter.js';
-import { HELP_CATEGORIES } from '../../engine/commands/help-categories.js';
+} from '../../server/presentation/command-presenter.js';
+import { FeishuFormatter } from '../../server/channels/feishu/formatter.js';
+import { HELP_CATEGORIES } from '../../server/engine/commands/help-categories.js';
 
 const feishuFormatter = new FeishuFormatter('zh');
 
@@ -46,6 +46,23 @@ describe('command presenter', () => {
         permission: { mode: 'off' },
         bridge: { healthy: true },
         session: {
+          topics: [
+            {
+              index: 1,
+              sdkSessionId: 'sdk-local-1',
+              scopeId: 'chat-1#thread:thread-1',
+              threadId: 'thread-1',
+              cwd: '/home/user/project',
+              title: 'Local topic',
+              preview: 'Topic preview',
+              provider: 'claude',
+              providerDisplayName: 'Claude',
+              clientId: 'local',
+              updatedAt: '刚刚',
+              isCurrent: true,
+              isActive: false,
+            },
+          ],
           recent: [
             {
               index: 1,
@@ -53,6 +70,16 @@ describe('command presenter', () => {
               preview: 'Recent task',
               isCurrent: true,
               cwd: '/home/user/project',
+              clientId: 'local',
+              provider: 'claude',
+              providerDisplayName: 'Claude',
+              sdkSessionId: 'recent-bound-topic',
+              topic: {
+                scopeId: 'chat-1#thread:thread-1',
+                threadId: 'thread-1',
+                updatedAt: '刚刚',
+                isActive: false,
+              },
             },
           ],
         },
@@ -66,7 +93,6 @@ describe('command presenter', () => {
               isDefault: true,
               isLocal: true,
               activeTurns: 0,
-              maxConcurrency: 1,
               workspaces: [{ path: '/home/user/project', isDefault: true }],
               providers: [
                 { kind: 'claude', displayName: 'Claude', available: true, isDefault: true },
@@ -85,6 +111,11 @@ describe('command presenter', () => {
       const rendered = JSON.stringify(formatted.feishuElements);
       expect(rendered).toContain('local');
       expect(rendered).toContain('新建 Claude');
+      expect(rendered).toContain('查看节点历史');
+      expect(rendered).toContain('节点: `local`');
+      expect(rendered).toContain('recent-');
+      expect(rendered).toContain('回到话题');
+      expect(rendered).not.toContain('设为默认');
     });
 
     it('keeps Feishu home card under the platform element limit', () => {
@@ -125,6 +156,7 @@ describe('command presenter', () => {
             preview: `Preview ${index}`,
             provider: index % 2 === 0 ? 'claude' : 'codex',
             providerDisplayName: index % 2 === 0 ? 'Claude' : 'Codex',
+            clientId: index % 2 === 0 ? 'local' : 'worker-1',
             updatedAt: '刚刚',
             isCurrent: index === 0,
             isActive: index === 1,

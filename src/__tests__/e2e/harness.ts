@@ -2,23 +2,23 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { vi } from 'vitest';
-import type { CanonicalEvent } from '../../canonical/schema.js';
-import { BaseChannelAdapter } from '../../channels/base.js';
-import { RateLimitError } from '../../channels/errors.js';
+import type { CanonicalEvent } from '../../shared/canonical/schema.js';
+import { BaseChannelAdapter } from '../../server/channels/base.js';
+import { RateLimitError } from '../../server/channels/errors.js';
 import type {
   InboundMessage,
   SendResult,
   StreamingCardSession,
   ThreadStartResult,
-} from '../../channels/types.js';
-import { FeishuFormatter } from '../../channels/feishu/formatter.js';
-import { FEISHU_POLICY } from '../../channels/feishu/policy.js';
-import type { FeishuRenderedMessage } from '../../channels/feishu/types.js';
-import type { Config } from '../../config.js';
-import { BridgeManager } from '../../engine/coordinators/bridge-manager.js';
-import type { LiveSession, MessagePriority, StreamChatResult, TurnParams } from '../../providers/base.js';
-import type { ClaudeSDKProvider } from '../../providers/claude-sdk.js';
-import { JsonFileStore } from '../../store/json-file.js';
+} from '../../server/channels/types.js';
+import { FeishuFormatter } from '../../server/channels/feishu/formatter.js';
+import { FEISHU_POLICY } from '../../server/channels/feishu/policy.js';
+import type { FeishuRenderedMessage } from '../../server/channels/feishu/types.js';
+import type { Config } from '../../shared/config.js';
+import { BridgeManager } from '../../server/engine/coordinators/bridge-manager.js';
+import type { LiveSession, MessagePriority, StreamChatResult, TurnParams } from '../../shared/providers/base.js';
+import type { ClaudeSDKProvider } from '../../client/providers/claude-sdk.js';
+import { JsonFileStore } from '../../server/store/json-file.js';
 
 type Scenario =
   | string
@@ -42,7 +42,7 @@ export class TestFeishuAdapter extends BaseChannelAdapter<FeishuRenderedMessage>
   private editRateLimitFailures = 0;
   private nextMessageSeq = 1;
 
-  constructor(private readonly authorizedUsers = new Set(['user-1', 'webhook'])) {
+  constructor(private readonly authorizedUsers = new Set(['user-1', 'service-user'])) {
     super();
     this.formatter = new FeishuFormatter('zh');
   }
@@ -310,7 +310,6 @@ export function createE2EHarness(scenario?: Scenario): E2EHarness {
         isDefault: true,
         isLocal: true,
         activeTurns: 0,
-        maxConcurrency: 1,
         workspaces: [{ path: root, isDefault: true }],
         providers: [{ kind: 'claude', displayName: 'Claude', available: true, isDefault: true }],
         version: 'test',
@@ -371,41 +370,25 @@ export function findCallbackData(adapter: TestFeishuAdapter, prefix: string): st
 
 function testConfig(root: string): Config {
   return {
-    port: 8080,
     token: 'test-token',
     provider: 'claude',
     locale: 'zh',
     defaultWorkdir: root,
     defaultModel: '',
     agentSettingSources: ['user', 'project', 'local'],
-    codex: {
-      model: '',
-      codexPath: '',
-      sandboxMode: 'workspace-write',
-      approvalPolicy: 'on-request',
-      skipGitRepoCheck: false,
-    },
-    webhook: {
+    mcp: {
       enabled: false,
-      token: 'webhook-token',
-      port: 0,
-      path: '/webhook',
-      sessionStrategy: 'create',
-      rateLimitPerMinute: 0,
-    },
-    exec: {
-      enabled: false,
-      allowedCommands: [],
-      timeout: 30_000,
-      logExec: true,
+      port: 8081,
+      path: '/mcp',
+      token: 'mcp-token',
+      maxFileSizeBytes: 20 * 1024 * 1024,
     },
     feishu: {
       appId: 'cli_test_app',
       appSecret: 'secret',
       verificationToken: 'verify',
       encryptKey: '',
-      webhookPort: 0,
-      allowedUsers: ['user-1', 'webhook'],
+      allowedUsers: ['user-1', 'service-user'],
       autoPinTopics: false,
     },
     ui: {
@@ -413,12 +396,9 @@ function testConfig(root: string): Config {
     },
     remote: {
       server: {
-        enabled: false,
-        localClientEnabled: true,
         port: 8787,
         path: '/tlive',
         token: 'remote-token',
-        providers: ['claude', 'codex'],
         heartbeatIntervalMs: 30_000,
         clientTimeoutMs: 90_000,
       },
@@ -427,9 +407,7 @@ function testConfig(root: string): Config {
         token: 'remote-token',
         clientId: 'test-client',
         name: 'test-client',
-        providers: ['claude', 'codex'],
         workspaces: [root],
-        maxConcurrency: 1,
         reconnectIntervalMs: 3000,
       },
     },

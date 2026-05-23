@@ -1,9 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { BridgeManager } from '../../engine/coordinators/bridge-manager.js';
-import type { BaseChannelAdapter } from '../../channels/base.js';
-import type { RenderedMessage } from '../../channels/types.js';
-import type { FormattableMessage } from '../../formatting/message-types.js';
-import { FeishuFormatter } from '../../channels/feishu/formatter.js';
+import { BridgeManager } from '../../server/engine/coordinators/bridge-manager.js';
+import type { BaseChannelAdapter } from '../../server/channels/base.js';
+import type { RenderedMessage } from '../../server/channels/types.js';
+import type { FormattableMessage } from '../../shared/formatting/message-types.js';
+import { FeishuFormatter } from '../../server/channels/feishu/formatter.js';
 
 const feishuFormatter = new FeishuFormatter('zh');
 
@@ -57,10 +57,9 @@ describe('BridgeManager', () => {
     process.env.TL_TOKEN = 'test-token';
     process.env.TL_FS_APP_ID = 'cli_test123';
     process.env.TL_FS_APP_SECRET = 'secret';
-    // Use port 0 (random available port) to avoid conflicts in parallel tests
-    process.env.TL_WEBHOOK_ENABLED = 'true';
-    process.env.TL_WEBHOOK_TOKEN = 'test-webhook-token';
-    process.env.TL_WEBHOOK_PORT = '0';
+    // BridgeManager tests exercise message routing, not the real HTTP MCP listener.
+    process.env.TL_MCP_ENABLED = 'false';
+    process.env.TL_REMOTE_SERVER_PORT = '0';
     store = {
       acquireLock: vi.fn().mockResolvedValue(true),
       releaseLock: vi.fn(),
@@ -78,6 +77,11 @@ describe('BridgeManager', () => {
       }),
     };
     manager = new BridgeManager({ defaultWorkdir: '/tmp', store, llm });
+  });
+
+  afterEach(() => {
+    delete process.env.TL_MCP_ENABLED;
+    delete process.env.TL_REMOTE_SERVER_PORT;
   });
 
   it('filters unauthorized messages', async () => {
@@ -230,46 +234,6 @@ describe('BridgeManager', () => {
         }),
       );
     });
-  });
-
-  it('rotates the default session when automation changes workdir', async () => {
-    const adapter = mockAdapter();
-    manager.registerAdapter(adapter);
-
-    const binding = {
-      channelType: 'feishu',
-      chatId: 'c1',
-      sessionId: 'binding-1',
-      sdkSessionId: 'sdk-old',
-      cwd: '/repo/old',
-      projectName: 'old-project',
-      createdAt: '',
-    };
-    store.getBinding.mockImplementation(async () => binding);
-    store.saveBinding.mockImplementation(async (nextBinding: typeof binding) => {
-      Object.assign(binding, nextBinding);
-    });
-
-    const cleanupSpy = vi.spyOn(manager.getSdkEngine(), 'cleanupSession');
-    const clearWhitelistSpy = vi.spyOn(manager.getPermissions(), 'clearSessionWhitelist');
-    const queryRunSpy = vi.spyOn(manager.getQuery(), 'run').mockResolvedValue(true);
-
-    const result = await manager.injectAutomationPrompt({
-      channelType: 'feishu',
-      chatId: 'c1',
-      text: 'analyze',
-      workdir: '/repo/new',
-      projectName: 'new-project',
-    });
-
-    expect(cleanupSpy).not.toHaveBeenCalled();
-    expect(clearWhitelistSpy).not.toHaveBeenCalled();
-    expect(binding.sdkSessionId).toBeUndefined();
-    expect(binding.sessionId).not.toBe('binding-1');
-    expect(binding.cwd).toBe('/repo/new');
-    expect(binding.projectName).toBe('new-project');
-    expect(queryRunSpy).toHaveBeenCalled();
-    expect(result.sessionId).toBe(binding.sessionId);
   });
 
   it('continues topic messages after 30 minutes of inactivity', async () => {

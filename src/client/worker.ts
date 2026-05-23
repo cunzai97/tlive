@@ -1,25 +1,33 @@
 import { WebSocket, type RawData } from 'ws';
-import { hostname } from 'node:os';
-import { resolve } from 'node:path';
+import { hostname, homedir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { stat } from 'node:fs/promises';
+import { exec } from 'node:child_process';
+import { promisify } from 'node:util';
 import type {
   AgentProviderRegistry,
   AgentProviderDescriptor,
-} from '../providers/registry.js';
-import type { LiveSession, QueryControls } from '../providers/base.js';
-import type { AgentProviderKind } from '../providers/kinds.js';
-import { generateId } from '../core/id.js';
+} from './providers/registry.js';
+import type { LiveSession, QueryControls } from '../shared/providers/base.js';
+import type { AgentProviderKind } from '../shared/providers/kinds.js';
+import { generateId } from '../shared/core/id.js';
 import {
   encodeRemoteProtocolMessage,
   parseRemoteProtocolMessage,
   REMOTE_PROTOCOL_VERSION,
   type ClientHelloMessage,
   type ControlMessage,
+  type ClientCommandMessage,
   type InteractionResponseMessage,
   type RemoteInteractionKind,
   type RemoteProviderDescriptor,
+  type RemoteSessionDescriptor,
   type ServerToClientMessage,
   type TurnStartMessage,
-} from '../protocol/messages.js';
+} from '../shared/protocol/messages.js';
+import { listLocalSessionDescriptors } from './session-index.js';
+
+const execAsync = promisify(exec);
 
 export interface RemoteClientWorkerOptions {
   serverUrl: string;
@@ -27,8 +35,6 @@ export interface RemoteClientWorkerOptions {
   clientId: string;
   name: string;
   workspaces: string[];
-  providers: AgentProviderKind[];
-  maxConcurrency: number;
   reconnectIntervalMs: number;
   version?: string;
 }
@@ -129,10 +135,9 @@ export class RemoteClientWorker {
   }
 
   private buildHello(): ClientHelloMessage {
-    const descriptors = this.providers
-      .list()
-      .filter((descriptor) => this.options.providers.includes(descriptor.kind))
-      .map((descriptor) => this.toRemoteProviderDescriptor(descriptor));
+    const descriptors = this.reportableProviderDescriptors().map((descriptor) =>
+      this.toRemoteProviderDescriptor(descriptor),
+    );
     return {
       type: 'client.hello',
       protocolVersion: REMOTE_PROTOCOL_VERSION,
@@ -140,9 +145,15 @@ export class RemoteClientWorker {
       name: this.options.name,
       providers: descriptors,
       workspaces: this.options.workspaces.map((path) => ({ path: resolve(path) })),
-      maxConcurrency: this.options.maxConcurrency,
+      sessions: this.scanSessions(),
       version: this.options.version,
     };
+  }
+
+  private reportableProviderDescriptors(): AgentProviderDescriptor[] {
+    return this.providers
+      .list()
+      .filter((descriptor) => descriptor.available && Boolean(this.providers.get(descriptor.kind)));
   }
 
   private toRemoteProviderDescriptor(
@@ -190,6 +201,9 @@ export class RemoteClientWorker {
       case 'control':
         void this.handleControl(message);
         break;
+      case 'client.command':
+        void this.handleClientCommand(message);
+        break;
       case 'interaction.response':
         this.resolveInteraction(message);
         break;
@@ -199,11 +213,6 @@ export class RemoteClientWorker {
   }
 
   private async handleTurnStart(message: TurnStartMessage): Promise<void> {
-    if (this.activeTurns.size >= this.options.maxConcurrency) {
-      this.send({ type: 'turn.error', turnId: message.turnId, message: 'Remote client is busy' });
-      return;
-    }
-
     try {
       const entry = this.getOrCreateSession(message);
       const result = entry.session.startTurn(message.prompt, {
@@ -284,7 +293,7 @@ export class RemoteClientWorker {
   private async consumeTurn(
     turnId: string,
     entry: LocalSessionEntry,
-    stream: ReadableStream<import('../canonical/schema.js').CanonicalEvent>,
+    stream: ReadableStream<import('../shared/canonical/schema.js').CanonicalEvent>,
   ): Promise<void> {
     try {
       const reader = stream.getReader();
@@ -378,6 +387,74 @@ export class RemoteClientWorker {
     }
   }
 
+  private async handleClientCommand(message: ClientCommandMessage): Promise<void> {
+    try {
+      if (message.action === 'path.stat') {
+        if (!message.path) throw new Error('path is required');
+        const path = resolveClientPath(message.path);
+        const st = await stat(path);
+        this.send({
+          type: 'client.command.result',
+          commandId: message.commandId,
+          ok: true,
+          path,
+          exists: true,
+          isDirectory: st.isDirectory(),
+        });
+        return;
+      }
+
+      if (message.action === 'shell.exec') {
+        if (!message.command) throw new Error('command is required');
+        if (!message.cwd) throw new Error('cwd is required');
+        const result = await execAsync(message.command, {
+          cwd: message.cwd,
+          timeout: message.timeoutMs ?? 30_000,
+          maxBuffer: message.maxBufferBytes ?? 4 * 1024 * 1024,
+        });
+        this.send({
+          type: 'client.command.result',
+          commandId: message.commandId,
+          ok: true,
+          stdout: result.stdout,
+          stderr: result.stderr,
+          exitCode: 0,
+        });
+        return;
+      }
+
+      throw new Error(`Unsupported client command: ${message.action}`);
+    } catch (err) {
+      const nodeErr = err as NodeJS.ErrnoException & {
+        stdout?: string;
+        stderr?: string;
+        code?: number | string;
+        signal?: NodeJS.Signals;
+      };
+      if (message.action === 'path.stat' && nodeErr.code === 'ENOENT') {
+        this.send({
+          type: 'client.command.result',
+          commandId: message.commandId,
+          ok: true,
+          path: message.path ? resolveClientPath(message.path) : undefined,
+          exists: false,
+          isDirectory: false,
+        });
+        return;
+      }
+      this.send({
+        type: 'client.command.result',
+        commandId: message.commandId,
+        ok: false,
+        stdout: typeof nodeErr.stdout === 'string' ? nodeErr.stdout : undefined,
+        stderr: typeof nodeErr.stderr === 'string' ? nodeErr.stderr : undefined,
+        exitCode: typeof nodeErr.code === 'number' ? nodeErr.code : undefined,
+        signal: nodeErr.signal,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   private activeTurnForSession(sessionId: string): ActiveTurn | undefined {
     return [...this.activeTurns.values()].find((turn) => turn.sessionId === sessionId);
   }
@@ -394,8 +471,13 @@ export class RemoteClientWorker {
     this.send({
       type: 'client.status',
       activeTurns: this.activeTurns.size,
-      maxConcurrency: this.options.maxConcurrency,
+      sessions: this.scanSessions(),
     });
+  }
+
+  private scanSessions(): RemoteSessionDescriptor[] {
+    const providerKinds = this.reportableProviderDescriptors().map((provider) => provider.kind);
+    return listLocalSessionDescriptors(providerKinds, 20);
   }
 
   private urlWithToken(serverUrl: string): string {
@@ -419,4 +501,10 @@ export function defaultRemoteClientName(): string {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
+}
+
+function resolveClientPath(path: string): string {
+  if (path === '~') return homedir();
+  if (path.startsWith('~/')) return join(homedir(), path.slice(2));
+  return resolve(path);
 }

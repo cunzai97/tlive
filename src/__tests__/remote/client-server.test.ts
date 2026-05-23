@@ -4,12 +4,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { RemoteClientWorker } from '../../client/worker.js';
-import type { CanonicalEvent } from '../../canonical/schema.js';
-import { RemoteAgentProvider } from '../../server/remote-agent-provider.js';
-import { RemoteClientRegistry } from '../../server/client-registry.js';
-import { singleProviderRegistry } from '../../providers/registry.js';
+import type { CanonicalEvent } from '../../shared/canonical/schema.js';
+import { RemoteAgentProvider } from '../../server/clients/remote-agent-provider.js';
+import { RemoteClientRegistry } from '../../server/clients/client-registry.js';
+import { singleProviderRegistry } from '../../client/providers/registry.js';
 import { FakeClaudeProvider, waitFor } from '../e2e/harness.js';
-import type { AgentProvider } from '../../providers/base.js';
+import type { AgentProvider } from '../../shared/providers/base.js';
 
 async function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -48,7 +48,9 @@ describe('remote client/server bridge', () => {
 
   it('streams a remote provider turn over WebSocket', async () => {
     const root = mkdtempSync(join(tmpdir(), 'tlive-remote-'));
+    const outsideRoot = mkdtempSync(join(tmpdir(), 'tlive-remote-outside-'));
     cleanup.push(() => rmSync(root, { recursive: true, force: true }));
+    cleanup.push(() => rmSync(outsideRoot, { recursive: true, force: true }));
     const port = await freePort();
     const registry = new RemoteClientRegistry({
       port,
@@ -66,9 +68,7 @@ describe('remote client/server bridge', () => {
       token: 'test-token',
       clientId: 'worker-1',
       name: 'worker-1',
-      providers: ['claude'],
       workspaces: [root],
-      maxConcurrency: 1,
       reconnectIntervalMs: 100,
     });
     const workerRun = worker.start();
@@ -79,8 +79,15 @@ describe('remote client/server bridge', () => {
 
     await waitFor(() => registry.listClients().find((client) => client.clientId === 'worker-1'));
 
+    const statResult = await registry.statPath('worker-1', outsideRoot);
+    expect(statResult).toMatchObject({ ok: true, exists: true, isDirectory: true });
+
+    const shellResult = await registry.execShell('worker-1', 'pwd', outsideRoot);
+    expect(shellResult.ok).toBe(true);
+    expect(shellResult.stdout?.trim()).toBe(outsideRoot);
+
     const provider = new RemoteAgentProvider('claude', registry);
-    const session = provider.createSession({ workingDirectory: root });
+    const session = provider.createSession({ workingDirectory: outsideRoot });
     const result = session.startTurn('hello remote');
     const events = await collect(result.stream);
 
@@ -120,9 +127,7 @@ describe('remote client/server bridge', () => {
       token: 'test-token',
       clientId: 'worker-1',
       name: 'worker-1',
-      providers: ['claude'],
       workspaces: [root],
-      maxConcurrency: 1,
       reconnectIntervalMs: 100,
     });
     const workerRun = worker.start();

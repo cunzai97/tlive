@@ -24,7 +24,6 @@ The project no longer carries Telegram, QQ Bot, or generic multi-channel runtime
 - AskUserQuestion and deferred tool interactions for providers that support them
 - Session scanning and resume from `~/.claude/projects/` and TLive-created Codex sessions under `~/.codex/sessions`
 - File and image forwarding to providers that support attachments
-- Automation webhooks for external prompt injection
 - Release-based self-upgrade with `tlive upgrade`
 
 ## Install
@@ -49,7 +48,7 @@ tlive --help
 
 ## Quick Start
 
-Run the one-time setup and start the bridge:
+Run the one-time setup and start TLive:
 
 ```bash
 tlive setup
@@ -58,9 +57,13 @@ tlive start
 
 Then send `/tlive` in Feishu/Lark to open the workbench.
 
-TLive SDK sessions automatically load the bundled MCP server for agent-side callbacks.
-The MCP server exposes tools such as
-`tlive_send_file`, `tlive_send_image`, `tlive_inject_prompt`, and `tlive_status`.
+`tlive start` starts the server control plane and a local worker client. Use
+`tlive server --standalone` only when this machine should accept remote workers but not run a
+local Claude/Codex worker.
+
+TLive SDK sessions connect to the TLive HTTP MCP endpoint for agent-side callbacks.
+The MCP endpoint exposes tools such as
+`tlive_send_file`, `tlive_send_image`, and `tlive_status`.
 
 ## Architecture
 
@@ -71,7 +74,9 @@ The MCP server exposes tools such as
 └─────────────┘     └──────────────────┘     └─────────────┘
 ```
 
-The bridge runs locally, connects to Feishu through the Feishu/Lark SDK long connection, and drives the selected local agent provider. Claude Code is integrated through `@anthropic-ai/claude-agent-sdk`; Codex is integrated through `@openai/codex-sdk`.
+The server connects to Feishu through the Feishu/Lark SDK long connection. Agent execution runs in
+worker clients, including the local client that `tlive start` launches by default. Claude Code is
+integrated through `@anthropic-ai/claude-agent-sdk`; Codex is integrated through `@openai/codex-sdk`.
 
 ## IM Commands
 
@@ -113,19 +118,20 @@ The workbench shows new-session buttons only for detected local CLIs. Install `c
 
 ### Remote Workers
 
-One machine can run the Feishu bot and scheduler while worker machines connect over WebSocket and run local Claude/Codex sessions.
-The server host is also exposed as a local execution client by default. Set `TL_LOCAL_CLIENT_ENABLED=false` if the server should only coordinate remote clients.
+One machine can run the Feishu bot and scheduler while worker machines connect over WebSocket and
+run local Claude/Codex sessions. `tlive server` already starts a local worker client. Start
+additional workers with `tlive client` on the same host or on another machine.
 
 Server machine:
 
 ```env
-TL_REMOTE_SERVER_ENABLED=true
 TL_REMOTE_TOKEN=change-this-token
-TL_REMOTE_PROVIDERS=claude,codex
 ```
 
 ```bash
 tlive server
+# or, for a pure control-plane server:
+tlive server --standalone
 ```
 
 Worker machine:
@@ -133,6 +139,9 @@ Worker machine:
 ```bash
 tlive client --server ws://your-server:8787/tlive --token change-this-token --workspace /path/to/project
 ```
+
+See [Server / Client Architecture](docs/architecture.md) for the control-plane and execution-plane
+state ownership model.
 
 Codex runtime options:
 
@@ -160,8 +169,6 @@ Configure with:
 ```env
 TL_AGENT_SETTINGS=user,project,local
 ```
-
-Existing `TL_CLAUDE_SETTINGS` configs are still accepted as an alias.
 
 ## Upgrade
 

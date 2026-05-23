@@ -26,7 +26,6 @@ tlive 现在明确只服务一条工作流：
 - 支持 provider 能力范围内的 AskUserQuestion 和 deferred tool 交互
 - 扫描并恢复 `~/.claude/projects/` 下的 Claude Code 会话，以及 `~/.codex/sessions` 下由 TLive 创建的 Codex 会话
 - 文件和图片转发到支持附件的 provider
-- Webhook 等自动化入口
 - 基于 GitHub Release 的 `tlive upgrade` 自升级
 
 ## 安装
@@ -51,7 +50,7 @@ tlive --help
 
 ## 快速开始
 
-执行一次性配置并启动 bridge：
+执行一次性配置并启动 TLive：
 
 ```bash
 tlive setup
@@ -60,9 +59,12 @@ tlive start
 
 然后在飞书 / Lark 中发送 `/tlive` 打开工作台。
 
-TLive SDK 会话会自动加载内置 MCP server，用于 agent 回调 TLive。
-MCP server 会暴露 `tlive_send_file`、
-`tlive_send_image`、`tlive_inject_prompt`、`tlive_status` 等工具。
+`tlive start` 会同时启动 server 控制面和一个本地 worker client。只有这台机器只做
+控制面、不执行本地 Claude/Codex 时，才使用 `tlive server --standalone`。
+
+TLive SDK 会话会自动连接 TLive HTTP MCP endpoint，用于 agent 回调 TLive。
+MCP endpoint 会暴露 `tlive_send_file`、
+`tlive_send_image`、`tlive_status` 等工具。
 
 ## 架构
 
@@ -73,7 +75,9 @@ MCP server 会暴露 `tlive_send_file`、
 └─────────────┘     └──────────────────┘     └─────────────┘
 ```
 
-tlive 本地运行，通过飞书长连接接收消息，再驱动选定的本地 agent provider。Claude Code 通过 `@anthropic-ai/claude-agent-sdk` 接入；Codex 通过 `@openai/codex-sdk` 接入。
+server 通过飞书长连接接收消息。真正的 agent 执行发生在 worker client 中，包括
+`tlive start` 默认拉起的本地 client。Claude Code 通过 `@anthropic-ai/claude-agent-sdk`
+接入；Codex 通过 `@openai/codex-sdk` 接入。
 
 ## IM 命令
 
@@ -115,18 +119,19 @@ TL_PROVIDER=codex
 ### 远端 Worker
 
 中心机器可以只运行飞书 Bot 和调度层，多台工作机通过 WebSocket 连接回来执行本机 Claude/Codex 会话。
-server 主机默认也会作为一个 local 执行 client 出现在工作台里。如果 server 只负责调度远端机器，可以设置 `TL_LOCAL_CLIENT_ENABLED=false`。
+`tlive server` 默认已经会启动一个本地 worker client。需要更多执行节点时，可以在同机或其他机器上使用
+`tlive client` 启动。
 
 中心机器：
 
 ```env
-TL_REMOTE_SERVER_ENABLED=true
 TL_REMOTE_TOKEN=change-this-token
-TL_REMOTE_PROVIDERS=claude,codex
 ```
 
 ```bash
 tlive server
+# 或者，只启动纯控制面：
+tlive server --standalone
 ```
 
 工作机：
@@ -134,6 +139,8 @@ tlive server
 ```bash
 tlive client --server ws://your-server:8787/tlive --token change-this-token --workspace /path/to/project
 ```
+
+控制面和执行面的状态边界见 [Server / Client 架构](docs/architecture-cn.md)。
 
 Codex runtime 配置：
 
@@ -161,8 +168,6 @@ Claude Code 设置会按当前会话的工作目录加载：
 ```env
 TL_AGENT_SETTINGS=user,project,local
 ```
-
-已有的 `TL_CLAUDE_SETTINGS` 配置仍会作为别名读取。
 
 ## 升级
 

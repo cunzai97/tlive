@@ -27,8 +27,9 @@ vi.mock('@openai/codex-sdk', () => ({
   },
 }));
 
-import { CodexLiveSession, resolveCodexSessionOptions } from '../../providers/codex-live-session.js';
-import { CodexSDKProvider, toCodexReasoningEffort } from '../../providers/codex-sdk.js';
+import { CodexLiveSession, resolveCodexSessionOptions } from '../../client/providers/codex-live-session.js';
+import { loadCodexProviderConfig } from '../../client/providers/codex-config.js';
+import { CodexSDKProvider, toCodexReasoningEffort } from '../../client/providers/codex-sdk.js';
 
 describe('CodexSDKProvider', () => {
   const originalCodexHome = process.env.CODEX_HOME;
@@ -95,6 +96,41 @@ describe('CodexSDKProvider', () => {
     rmSync(codexHome, { recursive: true, force: true });
   });
 
+  it('loads Codex env options in the Codex provider boundary', () => {
+    const values = new Map([
+      ['TL_CODEX_MODEL', 'gpt-5.4'],
+      ['TL_CODEX_PATH', '/usr/local/bin/codex'],
+      ['TL_CODEX_SANDBOX_MODE', 'danger-full-access'],
+      ['TL_CODEX_APPROVAL_POLICY', 'never'],
+      ['TL_CODEX_SKIP_GIT_REPO_CHECK', 'true'],
+      ['TL_CODEX_REASONING_EFFORT', 'high'],
+      ['TL_CODEX_NETWORK_ACCESS', 'true'],
+      ['TL_CODEX_WEB_SEARCH', 'live'],
+    ]);
+
+    expect(loadCodexProviderConfig({ get: (key, fallback = '') => values.get(key) ?? fallback }))
+      .toEqual({
+        model: 'gpt-5.4',
+        codexPath: '/usr/local/bin/codex',
+        sandboxMode: 'danger-full-access',
+        approvalPolicy: 'never',
+        skipGitRepoCheck: true,
+        modelReasoningEffort: 'high',
+        networkAccessEnabled: true,
+        webSearchMode: 'live',
+      });
+  });
+
+  it('keeps Codex defaults local to the Codex provider config', () => {
+    expect(loadCodexProviderConfig({ defaultModel: 'gpt-5.5', get: (_key, fallback = '') => fallback }))
+      .toEqual({
+        model: 'gpt-5.5',
+        sandboxMode: 'workspace-write',
+        approvalPolicy: 'on-request',
+        skipGitRepoCheck: false,
+      });
+  });
+
   it('injects TLive MCP only into the SDK-created Codex process', () => {
     new CodexLiveSession({ workingDirectory: '/repo' });
 
@@ -102,12 +138,11 @@ describe('CodexSDKProvider', () => {
       config: {
         mcp_servers: {
           tlive: expect.objectContaining({
-            command: expect.any(String),
-            args: expect.any(Array),
+            type: 'http',
+            url: 'http://127.0.0.1:8081/mcp',
             tools: {
               tlive_send_file: { approval_mode: 'approve' },
               tlive_send_image: { approval_mode: 'approve' },
-              tlive_inject_prompt: { approval_mode: 'approve' },
               tlive_status: { approval_mode: 'approve' },
             },
           }),
