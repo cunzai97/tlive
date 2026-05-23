@@ -7,6 +7,7 @@ import { FeishuAdapter } from './channels/feishu/adapter.js';
 import { RemoteClientRegistry } from './server/client-registry.js';
 import { LOCAL_CLIENT_ID } from './server/client-agent-provider.js';
 import type { HomeClientEntry } from './formatting/message-types.js';
+import { t, setGlobalLocale } from './i18n/index.js';
 import {
   checkForUpdates,
   getCurrentVersion,
@@ -339,6 +340,7 @@ export async function main() {
 
   cachedConfig = loadConfig();
   const config = cachedConfig;
+  setGlobalLocale(config.locale);
   const tliveHome = getTliveHome();
 
   const logger = new Logger(
@@ -473,8 +475,12 @@ export async function main() {
   if (upgradeResult) {
     const { success, version, previousVersion, error, chatId, channelType } = upgradeResult;
     const text = success
-      ? `✅ 升级成功\n版本: v${previousVersion} → v${version}\n查看更新: https://github.com/huanghuoguoguo/tlive/releases`
-      : `❌ 升级失败\n错误: ${error || 'Unknown error'}\n版本: v${previousVersion}`;
+      ? t('main.upgradeSuccess')
+          .replace('{previous}', previousVersion)
+          .replace('{version}', version)
+      : t('main.upgradeFailed')
+          .replace('{error}', error || 'Unknown error')
+          .replace('{previous}', previousVersion);
 
     let delivered = false;
     try {

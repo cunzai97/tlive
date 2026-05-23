@@ -24,6 +24,9 @@ describe('UpgradeCommand', () => {
 
   beforeEach(async () => {
     vi.resetModules();
+    // Re-import and set locale after module reset
+    const { setGlobalLocale } = await import('../../i18n/index.js');
+    setGlobalLocale('zh');
     tmpDir = mkdtempSync(join(tmpdir(), 'tlive-upgrade-command-'));
     packageRoot = join(tmpDir, 'app');
     cliPath = join(packageRoot, 'scripts', 'cli.js');
@@ -61,6 +64,7 @@ describe('UpgradeCommand', () => {
       adapter: { send },
       msg: { chatId: 'chat-1' },
       parts: ['/upgrade', 'notes'],
+      locale: 'zh',
     } as any);
 
     expect(send).toHaveBeenCalledWith(
@@ -78,6 +82,7 @@ describe('UpgradeCommand', () => {
     await command.execute({
       adapter: { send },
       msg: { chatId: 'chat-1' },
+      locale: 'zh',
       parts: ['/upgrade'],
     } as any);
 
@@ -98,6 +103,7 @@ describe('UpgradeCommand', () => {
       adapter: { send },
       msg: { chatId: 'chat-1' },
       parts: ['/upgrade'],
+      locale: 'zh',
     } as any);
 
     expect(spawnMock).toHaveBeenCalledWith(
@@ -134,6 +140,7 @@ describe('UpgradeCommand', () => {
       adapter: { send },
       msg: { chatId: 'chat-1' },
       parts: ['/upgrade'],
+      locale: 'zh',
     } as any);
 
     expect(spawnMock).not.toHaveBeenCalled();
@@ -153,6 +160,7 @@ describe('UpgradeCommand', () => {
       adapter: { send },
       msg: { chatId: 'chat-1' },
       parts: ['/upgrade'],
+      locale: 'zh',
     } as any);
 
     expect(spawnMock).not.toHaveBeenCalled();

@@ -6,8 +6,22 @@ import { zh } from './zh.js';
 
 const dictionaries = { en, zh } as const;
 
-/** Look up a translation by locale and key */
-export function t(locale: Locale, key: TranslationKey): string {
+/** Global default locale - can be set at startup */
+let globalLocale: Locale = 'zh';
+
+/** Set the global default locale */
+export function setGlobalLocale(locale: Locale): void {
+  globalLocale = locale;
+}
+
+/** Get the current global locale */
+export function getGlobalLocale(): Locale {
+  return globalLocale;
+}
+
+/** Look up a translation by key (uses global locale, or override if provided) */
+export function t(key: TranslationKey, localeOverride?: Locale): string {
+  const locale = localeOverride ?? globalLocale;
   return dictionaries[locale][key];
 }
 

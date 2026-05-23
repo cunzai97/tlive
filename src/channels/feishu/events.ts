@@ -40,7 +40,7 @@ export function feishuCardActionToInbound(data: unknown): FeishuCardActionResult
         text: '',
         callbackData: `form:${interactionId}:${JSON.stringify(formValue)}`,
       },
-      response: successToast(t('zh', 'adapter.submitted')),
+      response: successToast(t('adapter.submitted')),
     };
   }
 
@@ -55,7 +55,7 @@ export function feishuCardActionToInbound(data: unknown): FeishuCardActionResult
       text: '',
       callbackData: action,
     },
-    response: successToast(t('zh', 'adapter.processing')),
+    response: successToast(t('adapter.processing')),
   };
 }
 

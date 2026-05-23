@@ -34,10 +34,11 @@ function summarizeOperationText(text: string): string {
     .trim();
   if (!cleaned) return '';
 
-  const sentence = cleaned
-    .split(/[。！？.!?\n]/)
-    .map(part => part.trim())
-    .find(Boolean) || cleaned;
+  const sentence =
+    cleaned
+      .split(/[。！？.!?\n]/)
+      .map((part) => part.trim())
+      .find(Boolean) || cleaned;
 
   return truncate(sentence, 20);
 }
@@ -60,7 +61,11 @@ function collectTimelineOperations(
 
   const flushCurrent = (): void => {
     if (!current) return;
-    if (current.thinkingContent.trim() || current.textEntries.length > 0 || current.toolEntries.length > 0) {
+    if (
+      current.thinkingContent.trim() ||
+      current.textEntries.length > 0 ||
+      current.toolEntries.length > 0
+    ) {
       operations.push(current);
     }
     current = undefined;
@@ -120,31 +125,40 @@ function collectTimelineOperations(
   return operations;
 }
 
-function buildOperationHeader(locale: Locale, operation: TimelineOperationDisplay, isExpanded: boolean): string {
-  const summarySource = operation.thinkingContent.trim()
-    || operation.textEntries.find(text => text.trim())
-    || '';
+function buildOperationHeader(
+  _locale: Locale,
+  operation: TimelineOperationDisplay,
+  isExpanded: boolean,
+): string {
+  const summarySource =
+    operation.thinkingContent.trim() || operation.textEntries.find((text) => text.trim()) || '';
   const summary = summarizeOperationText(summarySource);
-  const toolNames = [...new Set(operation.toolEntries.map(tool => tool.toolName))];
-  const toolSuffix = toolNames.length > 0
-    ? toolNames.length === 1
-      ? `${toolNames[0]}×${operation.toolEntries.length}`
-      : `${toolNames.slice(0, 2).join('/')} ${t(locale, 'progress.andMore')}`
-    : '';
+  const toolNames = [...new Set(operation.toolEntries.map((tool) => tool.toolName))];
+  const toolSuffix =
+    toolNames.length > 0
+      ? toolNames.length === 1
+        ? `${toolNames[0]}×${operation.toolEntries.length}`
+        : `${toolNames.slice(0, 2).join('/')} ${t('progress.andMore')}`
+      : '';
   const title = summary
     ? toolSuffix
       ? `${summary} · ${toolSuffix}`
       : summary
     : toolNames.length > 0
       ? toolNames.slice(0, 3).join(' · ')
-      : t(locale, 'progress.phaseThinking');
-  const hasPendingTool = operation.toolEntries.some(tool => tool.toolResult === undefined && !tool.isError);
-  const hasError = operation.toolEntries.some(tool => tool.isError);
+      : t('progress.phaseThinking');
+  const hasPendingTool = operation.toolEntries.some(
+    (tool) => tool.toolResult === undefined && !tool.isError,
+  );
+  const hasError = operation.toolEntries.some((tool) => tool.isError);
   const icon = hasError ? '❌' : hasPendingTool ? '⏳' : isExpanded ? '🔄' : '✅';
   return `${icon} ${title}`;
 }
 
-function buildOperationContent(operation: TimelineOperationDisplay, includeTextEntries: boolean): string {
+function buildOperationContent(
+  operation: TimelineOperationDisplay,
+  includeTextEntries: boolean,
+): string {
   const sections: string[] = [];
 
   if (operation.thinkingContent.trim()) {
@@ -156,7 +170,7 @@ function buildOperationContent(operation: TimelineOperationDisplay, includeTextE
   }
 
   if (operation.toolEntries.length > 0) {
-    const toolLines = operation.toolEntries.map(tool => {
+    const toolLines = operation.toolEntries.map((tool) => {
       const status = tool.isError ? '❌' : tool.toolResult !== undefined ? '✅' : '⏳';
       const result = tool.toolResult ? truncate(tool.toolResult, 120) : '';
       if (tool.toolName === 'Bash') {
@@ -227,7 +241,9 @@ export function buildProgressTimelineElements(params: FormatProgressParams): Fei
   const isDone = data.phase === 'completed' || data.phase === 'failed';
   const operations = collectTimelineOperations(data, { splitTextAfterTool: isDone });
   const visibleOperations = isDone
-    ? operations.filter(operation => operation.thinkingContent.trim() || operation.toolEntries.length > 0)
+    ? operations.filter(
+        (operation) => operation.thinkingContent.trim() || operation.toolEntries.length > 0,
+      )
     : operations;
 
   if (visibleOperations.length > 0) {
@@ -238,9 +254,7 @@ export function buildProgressTimelineElements(params: FormatProgressParams): Fei
       if (budget <= 0 && picked.length > 0) break;
       const operation = visibleOperations[i];
       const isLatest = picked.length === 0;
-      const maxPerOperation = isLatest
-        ? (isDone ? 1800 : 2800)
-        : (isDone ? 1200 : 1800);
+      const maxPerOperation = isLatest ? (isDone ? 1800 : 2800) : isDone ? 1200 : 1800;
       const reservedBudget = isLatest && !isDone ? Math.max(budget, 1800) : budget;
       const content = truncate(
         downgradeHeadings(buildOperationContent(operation, true)),
@@ -268,13 +282,13 @@ export function buildProgressTimelineElements(params: FormatProgressParams): Fei
     // Legacy fallback: separate thinking + tool panels
     if (data.thinkingText?.trim()) {
       elements.push(
-        collapsiblePanel(t(locale, 'progress.labelThinkingProcess'), [
+        collapsiblePanel(t('progress.labelThinkingProcess'), [
           markdownElement(truncate(data.thinkingText.trim(), 1500)),
         ]),
       );
     }
     if (data.toolLogs?.length) {
-      const logLines = data.toolLogs.map(log => {
+      const logLines = data.toolLogs.map((log) => {
         const icon = log.isError ? '❌' : '✅';
         const status = log.result !== undefined ? icon : '⏳';
         const resultLine = log.result ? `\n   → ${truncate(log.result, 120)}` : '';
@@ -282,7 +296,7 @@ export function buildProgressTimelineElements(params: FormatProgressParams): Fei
       });
       elements.push(
         collapsiblePanel(
-          `${t(locale, 'progress.labelToolCalls')} (${data.toolLogs.length})`,
+          `${t('progress.labelToolCalls')} (${data.toolLogs.length})`,
           [markdownElement(truncate(logLines.join('\n'), 2000))],
           { expanded: !isDone },
         ),
@@ -294,7 +308,7 @@ export function buildProgressTimelineElements(params: FormatProgressParams): Fei
 }
 
 export function buildProgressContentElements(params: FormatProgressParams): FeishuCardElement[] {
-  const { data, md, locale } = params;
+  const { data, md } = params;
   const elements: FeishuCardElement[] = [];
   const isDone = data.phase === 'completed' || data.phase === 'failed';
   const operations = collectTimelineOperations(data, { splitTextAfterTool: isDone });
@@ -307,17 +321,26 @@ export function buildProgressContentElements(params: FormatProgressParams): Feis
       }
     }
   } else if (data.phase === 'waiting_permission' && data.permission) {
-    const extraQueue = data.permission.queueLength > 1 ? `\n${t(locale, 'progress.labelPendingApprovals')}: ${data.permission.queueLength}` : '';
-    elements.push(md(
-      `**${t(locale, 'progress.labelCurrentWait')}**\n${data.permission.toolName}\n\`\`\`\n${truncate(data.permission.input, 260)}\n\`\`\`${extraQueue}`
-    ));
-    elements.push(md(`**${t(locale, 'progress.labelElapsedTime')}** ${data.elapsedSeconds}s`));
+    const extraQueue =
+      data.permission.queueLength > 1
+        ? `\n${t('progress.labelPendingApprovals')}: ${data.permission.queueLength}`
+        : '';
+    elements.push(
+      md(
+        `**${t('progress.labelCurrentWait')}**\n${data.permission.toolName}\n\`\`\`\n${truncate(data.permission.input, 260)}\n\`\`\`${extraQueue}`,
+      ),
+    );
+    elements.push(md(`**${t('progress.labelElapsedTime')}** ${data.elapsedSeconds}s`));
   } else if (!operations.length) {
     if (data.currentTool?.input) {
       const currentElapsed = data.currentTool.elapsed > 0 ? ` · ${data.currentTool.elapsed}s` : '';
-      elements.push(md(`**${t(locale, 'progress.labelRecentAction')}**\n${data.currentTool.name}: ${truncate(data.currentTool.input, 140)}${currentElapsed}`));
+      elements.push(
+        md(
+          `**${t('progress.labelRecentAction')}**\n${data.currentTool.name}: ${truncate(data.currentTool.input, 140)}${currentElapsed}`,
+        ),
+      );
     }
-    elements.push(md(`**${t(locale, 'progress.labelElapsedTime')}** ${data.elapsedSeconds}s`));
+    elements.push(md(`**${t('progress.labelElapsedTime')}** ${data.elapsedSeconds}s`));
   }
 
   // Status line for in-progress cards with timeline
@@ -330,18 +353,22 @@ export function buildProgressContentElements(params: FormatProgressParams): Feis
 
   // API retry indicator
   if (data.apiRetry) {
-    elements.push(md(`${t(locale, 'progress.apiRetry')} (${data.apiRetry.attempt}/${data.apiRetry.maxRetries})${data.apiRetry.error ? ` — ${data.apiRetry.error}` : ''}`));
+    elements.push(
+      md(
+        `${t('progress.apiRetry')} (${data.apiRetry.attempt}/${data.apiRetry.maxRetries})${data.apiRetry.error ? ` — ${data.apiRetry.error}` : ''}`,
+      ),
+    );
   }
 
   // Context compaction indicator
   if (data.compacting) {
-    elements.push(md(t(locale, 'progress.compacting')));
+    elements.push(md(t('progress.compacting')));
   }
 
   // Tool use summary
   if (data.toolUseSummaryText && isDone) {
     elements.push(
-      collapsiblePanel(t(locale, 'progress.labelToolSummary'), [
+      collapsiblePanel(t('progress.labelToolSummary'), [
         markdownElement(truncate(data.toolUseSummaryText, 1000)),
       ]),
     );
@@ -349,25 +376,41 @@ export function buildProgressContentElements(params: FormatProgressParams): Feis
 
   // Todo progress
   if (data.todoItems.length > 0) {
-    const done = data.todoItems.filter(item => item.status === 'completed').length;
-    const todoLines = data.todoItems.slice(0, 5).map(item => {
+    const done = data.todoItems.filter((item) => item.status === 'completed').length;
+    const todoLines = data.todoItems.slice(0, 5).map((item) => {
       const icon = item.status === 'completed' ? '✅' : item.status === 'in_progress' ? '🔧' : '⬜';
       return `${icon} ${item.content}`;
     });
-    elements.push(md(`**${t(locale, 'progress.labelWorkProgress')}** (${done}/${data.todoItems.length})\n${todoLines.join('\n')}`));
+    elements.push(
+      md(
+        `**${t('progress.labelWorkProgress')}** (${done}/${data.todoItems.length})\n${todoLines.join('\n')}`,
+      ),
+    );
   }
 
   return elements;
 }
 
-export function progressHeaderConfig(locale: Locale, data: ProgressData): { template: string; title: string } {
+export function progressHeaderConfig(
+  _locale: Locale,
+  data: ProgressData,
+): { template: string; title: string } {
   return data.phase === 'completed'
-    ? { template: 'green' as const, title: t(locale, 'progress.titleCompleted') }
+    ? { template: 'green' as const, title: t('progress.titleCompleted') }
     : data.phase === 'failed'
-      ? { template: 'red' as const, title: t(locale, 'progress.titleStopped') }
+      ? { template: 'red' as const, title: t('progress.titleStopped') }
       : data.phase === 'waiting_permission'
-        ? { template: 'orange' as const, title: t(locale, 'progress.titleWaitingPerm') }
+        ? { template: 'orange' as const, title: t('progress.titleWaitingPerm') }
         : data.isContinuation
-          ? { template: 'blue' as const, title: `${t(locale, 'progress.titleContinue')} (${data.totalTools} ${t(locale, 'progress.labelStepsCompleted')})` }
-          : { template: 'blue' as const, title: data.phase === 'starting' ? t(locale, 'progress.titleStarting') : t(locale, 'progress.titleRunning') };
+          ? {
+              template: 'blue' as const,
+              title: `${t('progress.titleContinue')} (${data.totalTools} ${t('progress.labelStepsCompleted')})`,
+            }
+          : {
+              template: 'blue' as const,
+              title:
+                data.phase === 'starting'
+                  ? t('progress.titleStarting')
+                  : t('progress.titleRunning'),
+            };
 }
