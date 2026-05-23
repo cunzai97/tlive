@@ -58,18 +58,9 @@ tlive start
 
 Then send `/tlive` in Feishu/Lark to open the workbench.
 
-If you prefer guided setup inside Claude Code, install the skill and ask Claude:
-
-```bash
-tlive install skills
-claude
-```
-
-```text
-help me setup tlive
-```
-
-The setup flow will guide you through Feishu app credentials, local config, and bridge startup.
+TLive SDK sessions automatically load the bundled MCP server for agent-side callbacks.
+The MCP server exposes tools such as
+`tlive_send_file`, `tlive_send_image`, `tlive_inject_prompt`, and `tlive_status`.
 
 ## Architecture
 
@@ -84,18 +75,26 @@ The bridge runs locally, connects to Feishu through the Feishu/Lark SDK long con
 
 ## IM Commands
 
-Send a normal message inside an agent topic to start or continue work:
+The main chat is a command-only workbench. Use `/tlive` or `/home` to open it, then start
+Claude/Codex sessions from the client blocks. Each new session opens as its own Feishu/Lark topic.
+
+Send normal task messages inside an agent topic to start or continue work:
 
 ```text
 Fix the login bug in auth.ts
 ```
 
-Public text commands are intentionally small so agent slash commands such as `/model` can pass through to Claude Code or Codex.
+Normal text sent in the main chat will not start an agent session. If more than one execution
+client is connected, use `/use <client-id>` in the workbench to choose the default client. When
+there is exactly one client, TLive selects it automatically.
+
+Public workbench commands are intentionally small so agent slash commands such as `/model` can pass through to Claude Code or Codex inside topics.
 
 | Command | Description |
 |---------|-------------|
 | `/tlive` | Open the TLive workbench |
 | `/home` | Alias for the workbench |
+| `/use <client-id>` | Set the default execution client for the workbench |
 | `/stop` | Interrupt current execution |
 
 Other TLive operations are exposed in the workbench as buttons or command input, including new Claude/Codex sessions, session history, directory changes, permission mode, diagnostics, restart, and upgrade.
@@ -111,6 +110,29 @@ TL_PROVIDER=codex
 ```
 
 The workbench shows new-session buttons only for detected local CLIs. Install `claude` for Claude Code sessions and `codex` for Codex sessions.
+
+### Remote Workers
+
+One machine can run the Feishu bot and scheduler while worker machines connect over WebSocket and run local Claude/Codex sessions.
+The server host is also exposed as a local execution client by default. Set `TL_LOCAL_CLIENT_ENABLED=false` if the server should only coordinate remote clients.
+
+Server machine:
+
+```env
+TL_REMOTE_SERVER_ENABLED=true
+TL_REMOTE_TOKEN=change-this-token
+TL_REMOTE_PROVIDERS=claude,codex
+```
+
+```bash
+tlive server
+```
+
+Worker machine:
+
+```bash
+tlive client --server ws://your-server:8787/tlive --token change-this-token --workspace /path/to/project
+```
 
 Codex runtime options:
 

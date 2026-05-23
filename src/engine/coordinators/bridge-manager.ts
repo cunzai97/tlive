@@ -5,15 +5,12 @@ import type { AutomationBridge } from '../types/automation-bridge.js';
 import { loadConfig, type Config } from '../../config.js';
 import { WebhookServer } from '../automation/webhook.js';
 import {
-  buildFileSendSystemPrompt,
-  configureFileSendEnvironment,
-} from '../automation/file-send-prompt.js';
-import {
   AutomationPromptInjector,
   type AutomationPromptOptions,
   type AutomationPromptResult,
 } from '../automation/prompt-injector.js';
 import type { BridgeStore } from '../../store/interface.js';
+import type { HomeClientEntry } from '../../formatting/message-types.js';
 import type { AgentProvider } from '../../providers/base.js';
 import type { AgentProviderRegistry } from '../../providers/registry.js';
 import {
@@ -36,6 +33,7 @@ interface BridgeManagerDeps {
   providers?: AgentProviderRegistry;
   defaultWorkdir: string;
   config?: Config;
+  getExecutionClients?: () => HomeClientEntry[];
 }
 
 export class BridgeManager implements AutomationBridge {
@@ -53,16 +51,6 @@ export class BridgeManager implements AutomationBridge {
   constructor(deps: BridgeManagerDeps) {
     const config = deps.config ?? loadConfig();
     const { store, llm, defaultWorkdir, providers } = deps;
-    configureFileSendEnvironment({
-      enabled: config.webhook.enabled,
-      port: config.webhook.port,
-      token: config.webhook.token,
-    });
-    const appendSystemPrompt = buildFileSendSystemPrompt({
-      enabled: config.webhook.enabled,
-      port: config.webhook.port,
-      token: config.webhook.token,
-    });
 
     // Create all engine components via factory
     const factoryDeps: BridgeFactoryDeps = {
@@ -72,7 +60,7 @@ export class BridgeManager implements AutomationBridge {
       defaultWorkdir,
       config,
       getAdapters: () => this.adapters,
-      appendSystemPrompt,
+      getExecutionClients: deps.getExecutionClients,
     };
     this.components = createBridgeComponents(factoryDeps);
     this.inbound = new InboundDispatcher({
