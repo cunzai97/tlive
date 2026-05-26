@@ -324,11 +324,12 @@ function scheduleLocalClientFallback(
       return;
     }
 
+    const clientConfig = loadConfig({ validateBridge: false });
     const env = {
       ...process.env,
       TL_TOKEN: config.token,
       TL_REMOTE_TOKEN: config.remote.server.token,
-      TL_DEFAULT_WORKDIR: config.defaultWorkdir,
+      TL_DEFAULT_WORKDIR: clientConfig.defaultWorkdir,
       TL_REMOTE_SERVER_URL: localRemoteServerUrl(config),
     };
     const child = spawn(process.execPath, [clientEntry, '--name', 'local'], {
@@ -451,6 +452,7 @@ export async function main() {
     return remoteClients.listClients().map((client) => ({
       clientId: client.clientId,
       name: client.name,
+      note: client.note,
       online: true,
       isDefault: false,
       activeTurns: client.activeTurns,
