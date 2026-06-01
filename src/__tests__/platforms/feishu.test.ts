@@ -429,14 +429,13 @@ describe('FeishuAdapter', () => {
   });
 
   describe('editMessage()', () => {
-    it('silently ignores errors (non-fatal)', async () => {
+    it('propagates edit failures so the renderer can fall back to a new bubble', async () => {
       await adapter.start();
-      mockMessagePatch.mockRejectedValueOnce(new Error('400 not a card'));
-      // Should not throw
-      await adapter.editMessage('oc_chat123', 'msg-feishu-1', {
+      mockMessagePatch.mockRejectedValueOnce(new Error('Request failed with status code 400'));
+      await expect(adapter.editMessage('oc_chat123', 'msg-feishu-1', {
         chatId: 'oc_chat123',
         text: 'Updated content',
-      });
+      })).rejects.toMatchObject({ retryable: false, statusCode: 400 });
       await adapter.stop();
     });
 
@@ -547,7 +546,7 @@ describe('FeishuAdapter', () => {
       await adapter.stop();
     });
 
-    it('accepts group topic replies without requiring a bot mention', async () => {
+    it('ignores group topic replies that do not mention the current bot', async () => {
       await adapter.start();
 
       await mockEventHandler({
@@ -559,6 +558,34 @@ describe('FeishuAdapter', () => {
           message_type: 'text',
           content: JSON.stringify({ text: 'continue this topic' }),
           root_id: 'msg_root',
+        },
+        sender: { sender_id: { user_id: 'user_1', open_id: 'ou_123' } },
+      });
+
+      expect(await adapter.consumeOne()).toBeNull();
+
+      await adapter.stop();
+    });
+
+    it('accepts group topic replies that mention the current bot', async () => {
+      await adapter.start();
+
+      await mockEventHandler({
+        message: {
+          message_id: 'msg_group_topic_mention',
+          chat_id: 'chat_1',
+          chat_type: 'group',
+          thread_id: 'thread_1',
+          message_type: 'text',
+          content: JSON.stringify({ text: '@_user_1 continue this topic' }),
+          root_id: 'msg_root',
+          mentions: [
+            {
+              key: '@_user_1',
+              id: { open_id: 'ou_bot' },
+              name: 'openclaw',
+            },
+          ],
         },
         sender: { sender_id: { user_id: 'user_1', open_id: 'ou_123' } },
       });
