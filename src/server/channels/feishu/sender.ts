@@ -7,6 +7,7 @@ import type { FeishuCardElement } from './card-builder.js';
 import type { FeishuRenderedMessage } from './types.js';
 import { getFeishuUploadKey } from './buffers.js';
 import { Logger } from '../../../shared/logger.js';
+import { chunkByParagraph } from '../../../shared/formatting/text-chunk.js';
 
 const FEISHU_PROGRESS_SPLIT_BYTES = 27 * 1024;
 
@@ -50,10 +51,36 @@ export async function sendFeishuMessage(
     }
   }
 
+  const chunks = chunkByParagraph(raw, 25000);
+
+  if (chunks.length === 1) {
+    try {
+      const cardContent = buildCardForMessage(message, raw);
+      const result = await sendMessageContent(client, message, 'interactive', cardContent);
+      return { messageId: String(result?.data?.message_id ?? ''), success: true };
+    } catch (err) {
+      throw classifyError(err);
+    }
+  }
+
+  const firstMessageId = await sendSingleFeishuMessage(client, message, chunks[0], classifyError);
+  for (let i = 1; i < chunks.length; i++) {
+    const hint = `**气泡 ${i + 1}/${chunks.length}**\n`;
+    await sendSingleFeishuMessage(client, message, hint + chunks[i], classifyError);
+  }
+  return { messageId: firstMessageId, success: true };
+}
+
+async function sendSingleFeishuMessage(
+  client: Client,
+  message: FeishuRenderedMessage,
+  text: string,
+  classifyError: ClassifyError,
+): Promise<string> {
   try {
-    const cardContent = buildCardForMessage(message, raw);
+    const cardContent = buildCardForMessage(message, text);
     const result = await sendMessageContent(client, message, 'interactive', cardContent);
-    return { messageId: String(result?.data?.message_id ?? ''), success: true };
+    return String(result?.data?.message_id ?? '');
   } catch (err) {
     throw classifyError(err);
   }
@@ -67,22 +94,46 @@ export async function editFeishuMessage(
 ): Promise<void> {
   if (!client) return;
   const text = message.text ? message.text : markdownToFeishu(message.html ?? '');
+  const chunks = chunkByParagraph(text, 25000);
 
-  try {
-    await client.im.message.patch({
-      path: { message_id: messageId },
-      data: {
-        content: message.feishuElements
-          ? buildStructuredCardForMessage(message)
-          : buildPlainCard(text, message.buttons, message.feishuHeader),
-      },
-    });
-  } catch (err: any) {
-    if (classifyError && isFeishuRateLimit(err)) {
-      throw classifyError(err);
+  if (chunks.length === 1) {
+    try {
+      await client.im.message.patch({
+        path: { message_id: messageId },
+        data: {
+          content: message.feishuElements
+            ? buildStructuredCardForMessage(message)
+            : buildPlainCard(chunks[0], message.buttons, message.feishuHeader),
+        },
+      });
+    } catch (err: any) {
+      if (classifyError && isFeishuRateLimit(err)) {
+        throw classifyError(err);
+      }
+      console.warn(`[feishu] editMessage failed: ${err?.message ?? err}`);
+      throw classifyError ? classifyError(err) : err;
     }
-    console.warn(`[feishu] editMessage failed: ${err?.message ?? err}`);
-    throw classifyError ? classifyError(err) : err;
+    return;
+  }
+
+  await client.im.message.patch({
+    path: { message_id: messageId },
+    data: {
+      content: message.feishuElements
+        ? buildStructuredCardForMessage(message)
+        : buildPlainCard(chunks[0], message.buttons, message.feishuHeader),
+    },
+  });
+
+  for (let i = 1; i < chunks.length; i++) {
+    const hint = `**气泡 ${i + 1}/${chunks.length}**\n`;
+    const result = await sendMessageContent(
+      client,
+      { ...message, text: hint + chunks[i] },
+      'interactive',
+      buildCardForMessage({ ...message, text: hint + chunks[i] }, hint + chunks[i]),
+    );
+    console.log(`[feishu] Sent chunk ${i + 1}/${chunks.length}: ${result?.data?.message_id}`);
   }
 }
 
