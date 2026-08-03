@@ -97,6 +97,7 @@ export interface Translations {
   // --- newSession ---
   'newSession.title': string;
   'newSession.feedbackText': string;
+  'newSession.resetFeedbackText': string;
 
   // --- taskSummary ---
   'taskSummary.title': string;

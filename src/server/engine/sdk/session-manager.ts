@@ -18,7 +18,7 @@ import {
 } from '../../../shared/core/key.js';
 
 /** Reason for closing a session — used for logging and diagnostics */
-export type SessionCleanupReason = 'new' | 'switch' | 'cd' | 'settings' | 'expire' | 'close';
+export type SessionCleanupReason = 'new' | 'switch' | 'cd' | 'settings' | 'expire' | 'close' | 'reset';
 
 /** Managed session — wraps a LiveSession with per-chat metadata */
 export interface ManagedSession {

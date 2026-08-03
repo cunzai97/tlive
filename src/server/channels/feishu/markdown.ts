@@ -113,11 +113,12 @@ export function splitLargeTables(text: string, _locale: Locale = 'zh'): string {
  */
 export function splitByTableCount(text: string): string[] {
   const tablePositions: number[] = [];
-  let match;
   const regex = new RegExp(TABLE_REGEX);
 
-  while ((match = regex.exec(text)) !== null) {
+  let match: RegExpExecArray | null = regex.exec(text);
+  while (match !== null) {
     tablePositions.push(match.index);
+    match = regex.exec(text);
   }
 
   if (tablePositions.length <= MAX_TABLES_PER_CARD) {

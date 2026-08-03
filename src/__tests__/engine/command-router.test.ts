@@ -940,7 +940,7 @@ describe('CommandRouter /settings', () => {
       cwd: currentDir,
     });
     expect((adapterWithTopic.startThreadWithTitle as any).mock.calls.at(-1)[1]).toContain(
-      'workspace',
+      'vm-0-16',
     );
   });
 

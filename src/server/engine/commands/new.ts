@@ -63,11 +63,6 @@ export class NewCommand extends BaseCommand {
 
     // In a topic: reset the current session context instead of creating a new topic
     if (ctx.surface === 'topic' && previousBinding?.sessionId) {
-      const sessionKey = ctx.services.state.stateKey(
-        ctx.msg.channelType,
-        scopeId,
-        previousBinding.sessionId,
-      );
       ctx.services.sdkEngine?.cleanupSession(
         ctx.msg.channelType,
         ctx.msg.chatId,

@@ -170,7 +170,6 @@ export class FeishuStreamingSession {
     const paragraphs = text.split(/\n{2,}/);
     let result = '';
     for (const para of paragraphs) {
-      const paraBytes = Buffer.byteLength(para, 'utf8');
       const separator = result ? '\n\n' : '';
       const additionBytes = Buffer.byteLength(separator + para, 'utf8');
       if (result && Buffer.byteLength(result, 'utf8') + additionBytes > availableBytes) {
@@ -185,7 +184,6 @@ export class FeishuStreamingSession {
       const lines = firstPara.split('\n');
       result = '';
       for (const line of lines) {
-        const lineBytes = Buffer.byteLength(line, 'utf8');
         const separator = result ? '\n' : '';
         if (Buffer.byteLength(result, 'utf8') + Buffer.byteLength(separator + line, 'utf8') > availableBytes) {
           break;
