@@ -1,6 +1,9 @@
 import type { BridgeStore } from '../store/interface.js';
 import type { AgentProvider } from '../../shared/providers/base.js';
-import { singleProviderRegistry, type AgentProviderRegistry } from '../../shared/providers/registry.js';
+import {
+  singleProviderRegistry,
+  type AgentProviderRegistry,
+} from '../../shared/providers/registry.js';
 import type { Config, ProjectsValidationResult } from '../../shared/config.js';
 import type { BaseChannelAdapter } from '../channels/base.js';
 import type { InboundMessage } from '../channels/types.js';
@@ -131,6 +134,7 @@ export function createBridgeComponents(deps: BridgeFactoryDeps): BridgeComponent
     defaultWorkdir,
     topicSessions,
     defaultAgentSettingSources: config.agentSettingSources,
+    maxFileDeliveryBytes: config.mcp.maxFileSizeBytes,
     appendSystemPrompt: deps.appendSystemPrompt,
     onConversationMessageResolved: async (msg, rawMsg) => {
       ingress.recordDeliveryTarget(msg);

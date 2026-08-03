@@ -4,6 +4,7 @@ import { basename, extname, resolve } from 'node:path';
 import type { TliveMcpBridge } from '../mcp/bridge.js';
 import { applyDeliveryRoute, type DeliveryRoute } from '../channels/delivery-route.js';
 import type { MediaAttachment } from '../../shared/media/attachments.js';
+import type { BaseChannelAdapter } from '../channels/base.js';
 
 const MIME_MAP: Record<string, string> = {
   '.png': 'image/png',
@@ -80,6 +81,54 @@ export interface FileDeliveryServiceOptions {
   maxFileSizeBytes?: number;
 }
 
+export interface LocalFileDeliveryInput {
+  adapter: BaseChannelAdapter;
+  route: DeliveryRoute;
+  workdir: string;
+  filePath: string;
+  caption?: string;
+  maxFileSizeBytes?: number;
+}
+
+/** Deliver a filesystem path that is local to the bridge process. */
+export async function deliverLocalFile(
+  input: LocalFileDeliveryInput,
+): Promise<FileDeliveryResponse> {
+  const resolvedPath = resolve(input.workdir, input.filePath);
+
+  let fileStat: Stats;
+  try {
+    fileStat = await stat(resolvedPath);
+  } catch {
+    return { success: false, error: `File not found: ${input.filePath}` };
+  }
+
+  if (!fileStat.isFile()) return { success: false, error: `Not a file: ${input.filePath}` };
+  const sizeError = validateFileSize(
+    fileStat.size,
+    input.maxFileSizeBytes ?? DEFAULT_MAX_FILE_DELIVERY_BYTES,
+  );
+  if (sizeError) return { success: false, error: sizeError };
+
+  let buffer: Buffer;
+  try {
+    buffer = await readFile(resolvedPath);
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) };
+  }
+
+  const fileName = basename(resolvedPath);
+  const mimeType = guessMimeType(fileName);
+  return deliverBuffer({
+    adapter: input.adapter,
+    route: input.route,
+    buffer,
+    fileName,
+    mimeType,
+    caption: input.caption,
+  });
+}
+
 export class FileDeliveryService {
   private readonly maxFileSizeBytes: number;
 
@@ -92,27 +141,17 @@ export class FileDeliveryService {
     if ('error' in target) return { success: false, error: target.error };
 
     const cwd = await this.resolveCwd(target);
-    const resolvedPath = resolve(cwd, input.filePath);
-
-    let fileStat: Stats;
-    try {
-      fileStat = await stat(resolvedPath);
-    } catch {
-      return { success: false, error: `File not found: ${input.filePath}` };
+    const adapter = this.options.bridge.getAdapter(target.route.channelType);
+    if (!adapter) {
+      return { success: false, error: `Channel '${target.route.channelType}' not available` };
     }
-
-    if (!fileStat.isFile()) return { success: false, error: `Not a file: ${input.filePath}` };
-    const sizeError = this.validateSize(fileStat.size);
-    if (sizeError) return { success: false, error: sizeError };
-
-    const buffer = await readFile(resolvedPath);
-    const ext = extname(resolvedPath).toLowerCase();
-    return this.sendBuffer({
-      buffer,
-      fileName: basename(resolvedPath),
-      mimeType: MIME_MAP[ext] || 'application/octet-stream',
-      caption: input.caption,
+    return deliverLocalFile({
+      adapter,
       route: target.route,
+      workdir: cwd,
+      filePath: input.filePath,
+      caption: input.caption,
+      maxFileSizeBytes: this.maxFileSizeBytes,
     });
   }
 
@@ -162,10 +201,9 @@ export class FileDeliveryService {
       const detail = err instanceof Error ? err.message : String(err);
       return {
         success: false,
-        error: [
-          `Failed to fetch URL from the TLive MCP server: ${detail}`,
-          serverSideHint,
-        ].filter(Boolean).join(' '),
+        error: [`Failed to fetch URL from the TLive MCP server: ${detail}`, serverSideHint]
+          .filter(Boolean)
+          .join(' '),
       };
     }
     if (!response.ok) {
@@ -174,7 +212,9 @@ export class FileDeliveryService {
         error: [
           `Failed to fetch URL from the TLive MCP server: HTTP ${response.status}`,
           serverSideHint,
-        ].filter(Boolean).join(' '),
+        ]
+          .filter(Boolean)
+          .join(' '),
       };
     }
 
@@ -190,7 +230,9 @@ export class FileDeliveryService {
 
     const fileName = input.fileName || basename(parsed.pathname) || 'download';
     const mimeType =
-      input.mimeType || response.headers.get('content-type')?.split(';')[0] || guessMimeType(fileName);
+      input.mimeType ||
+      response.headers.get('content-type')?.split(';')[0] ||
+      guessMimeType(fileName);
     return this.sendBuffer({
       buffer,
       fileName,
@@ -212,25 +254,7 @@ export class FileDeliveryService {
       return { success: false, error: `Channel '${input.route.channelType}' not available` };
     }
 
-    const media: MediaAttachment = {
-      type: isImage(input.fileName, input.mimeType) ? 'image' : 'file',
-      buffer: input.buffer,
-      filename: input.fileName,
-      mimeType: input.mimeType,
-    };
-
-    try {
-      const outMsg = applyDeliveryRoute(
-        adapter.formatContent(input.route.chatId, input.caption || ''),
-        input.route,
-      );
-      outMsg.media = media;
-      const result = await adapter.send(outMsg);
-      if (result.success) return { success: true, filename: input.fileName };
-      return { success: false, error: 'Send failed' };
-    } catch (err) {
-      return { success: false, error: err instanceof Error ? err.message : String(err) };
-    }
+    return deliverBuffer({ ...input, adapter });
   }
 
   private async resolveTarget(
@@ -262,17 +286,53 @@ export class FileDeliveryService {
 
   private async resolveCwd(target: ResolvedFileDeliveryTarget): Promise<string> {
     if (target.cwd) return target.cwd;
-    const binding = await this.options.bridge.getBinding(target.route.channelType, target.route.scopeId);
+    const binding = await this.options.bridge.getBinding(
+      target.route.channelType,
+      target.route.scopeId,
+    );
     return binding?.cwd || this.options.defaultWorkdir;
   }
 
   private validateSize(size: number): string | undefined {
-    if (size <= 0) return 'File is empty';
-    if (size <= this.maxFileSizeBytes) return undefined;
-    const actual = Math.round(size / 1024 / 1024);
-    const max = Math.round(this.maxFileSizeBytes / 1024 / 1024);
-    return `File too large (${actual}MB). Maximum is ${max}MB.`;
+    return validateFileSize(size, this.maxFileSizeBytes);
   }
+}
+
+async function deliverBuffer(input: {
+  adapter: BaseChannelAdapter;
+  route: DeliveryRoute;
+  buffer: Buffer;
+  fileName: string;
+  mimeType: string;
+  caption?: string;
+}): Promise<FileDeliveryResponse> {
+  const media: MediaAttachment = {
+    type: isImage(input.fileName, input.mimeType) ? 'image' : 'file',
+    buffer: input.buffer,
+    filename: input.fileName,
+    mimeType: input.mimeType,
+  };
+
+  try {
+    const outMsg = applyDeliveryRoute(
+      input.adapter.formatContent(input.route.chatId, input.caption || ''),
+      input.route,
+    );
+    outMsg.media = media;
+    const result = await input.adapter.send(outMsg);
+    if (result.success) return { success: true, filename: input.fileName };
+    return { success: false, error: 'Send failed' };
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+function validateFileSize(size: number, maxFileSizeBytes: number): string | undefined {
+  if (size <= 0) return 'File is empty';
+  if (size <= maxFileSizeBytes) return undefined;
+  const actual = Math.round(size / 1024 / 1024);
+  const max = Math.round(maxFileSizeBytes / 1024 / 1024);
+  return `File too large (${actual}MB). Maximum is ${max}MB.`;
 }
 
 export function guessMimeType(fileName: string): string {
@@ -292,7 +352,10 @@ function serverSideUrlHint(url: URL): string | undefined {
 function isLocalOrPrivateHost(host: string): boolean {
   if (host === 'localhost' || host === '::1' || host === '[::1]') return true;
   const parts = host.split('.').map((part) => Number(part));
-  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
+  if (
+    parts.length !== 4 ||
+    parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)
+  ) {
     return false;
   }
   const [a, b] = parts;
