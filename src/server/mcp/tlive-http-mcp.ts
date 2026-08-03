@@ -21,7 +21,7 @@ const deliveryTargetSchema = {
   routeToken: z
     .string()
     .optional()
-    .describe('Per-turn TLive route token. Prefer this when the current prompt provides one.'),
+    .describe('TLive route token for the current conversation. Prefer this when the current prompt provides one.'),
   channelType: z
     .string()
     .optional()

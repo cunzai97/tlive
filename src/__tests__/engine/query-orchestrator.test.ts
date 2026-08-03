@@ -322,7 +322,7 @@ describe('QueryOrchestrator', () => {
     });
   });
 
-  it('injects a fresh file delivery route token into each live turn', async () => {
+  it('keeps a stable file delivery route token across turns in a live session', async () => {
     const scopeId = 'chat-1#thread:thread-1';
     const topicBinding = { ...defaultBinding, chatId: scopeId };
     const router = {
@@ -342,9 +342,7 @@ describe('QueryOrchestrator', () => {
       stream: new ReadableStream({ start: controller => controller.close() }),
     });
     const sdkEngine = createSdkEngine({
-      registerFileDeliveryRoute: vi.fn()
-        .mockReturnValueOnce('route-token-1')
-        .mockReturnValueOnce('route-token-2'),
+      registerFileDeliveryRoute: vi.fn().mockReturnValue('route-token'),
       getOrCreateSession: vi.fn().mockReturnValue({
         runtimeInfo: { provider: 'codex', displayName: 'Remote Codex' },
         startTurn,
@@ -366,6 +364,7 @@ describe('QueryOrchestrator', () => {
       text: 'send another file back',
     });
 
+    expect(sdkEngine.registerFileDeliveryRoute).toHaveBeenCalledTimes(2);
     expect(sdkEngine.registerFileDeliveryRoute).toHaveBeenCalledWith(
       expect.any(String),
       {
@@ -378,13 +377,13 @@ describe('QueryOrchestrator', () => {
       },
       '/tmp/project',
     );
-    expect(startTurn.mock.calls[0][0]).toContain('Current turn routeToken: route-token-1');
+    expect(startTurn.mock.calls[0][0]).toContain('Current routeToken: route-token');
     expect(startTurn.mock.calls[0][0]).toContain('tlive_send_image');
     expect(startTurn.mock.calls[0][0]).toContain('Do not answer only with a local filesystem path');
     expect(startTurn.mock.calls[0][0]).toContain('generate an image and send it back');
-    expect(startTurn.mock.calls[1][0]).toContain('Current turn routeToken: route-token-2');
+    expect(startTurn.mock.calls[1][0]).toContain('Current routeToken: route-token');
     expect(engine.processMessage.mock.calls[1][0].text).toContain(
-      'Current turn routeToken: route-token-2',
+      'Current routeToken: route-token',
     );
   });
 

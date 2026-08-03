@@ -16,6 +16,8 @@ export class FileDeliveryRegistry {
   static readonly DEFAULT_ROUTE_TTL_MS = 6 * 60 * 60 * 1000;
 
   private routes = new Map<string, FileDeliveryRouteEntry>();
+  /** Stable token per session key so the conversation prompt stays byte-stable (prompt-context caching). */
+  private sessionTokens = new Map<string, string>();
   private ttlMs: number;
   private now: () => number;
   private generateToken: () => string;
@@ -28,11 +30,22 @@ export class FileDeliveryRegistry {
 
   register(sessionKey: string, route: DeliveryRoute, cwd: string): string {
     this.prune();
+    const existingToken = this.sessionTokens.get(sessionKey);
+    if (existingToken !== undefined && this.routes.has(existingToken)) {
+      // Reuse the session's token and refresh the route so retries/replays of
+      // the same turn produce identical prompt bytes (keeps prompt cache valid).
+      this.routes.set(existingToken, {
+        route: { ...route, cwd, sessionKey },
+        createdAt: this.now(),
+      });
+      return existingToken;
+    }
     const token = this.nextToken();
     this.routes.set(token, {
       route: { ...route, cwd, sessionKey },
       createdAt: this.now(),
     });
+    this.sessionTokens.set(sessionKey, token);
     return token;
   }
 
@@ -46,6 +59,7 @@ export class FileDeliveryRegistry {
     const entry = this.routes.get(token);
     if (!entry) return undefined;
     this.routes.delete(token);
+    if (entry.route.sessionKey) this.sessionTokens.delete(entry.route.sessionKey);
     return entry.route;
   }
 
@@ -53,6 +67,7 @@ export class FileDeliveryRegistry {
     for (const [token, entry] of this.routes) {
       if (now - entry.createdAt > this.ttlMs) {
         this.routes.delete(token);
+        if (entry.route.sessionKey) this.sessionTokens.delete(entry.route.sessionKey);
       }
     }
   }

@@ -277,9 +277,9 @@ export class QueryTurnRunner {
 function fileDeliveryPrompt(routeToken: string): string {
   return [
     '<tlive_file_delivery>',
-    `Current turn routeToken: ${routeToken}`,
+    `Current routeToken: ${routeToken}`,
     'If the user asks you to send, return, upload, or deliver a file/image to this chat, call the TLive MCP tool tlive_send_file or tlive_send_image and include this routeToken.',
-    'This routeToken is only for the current turn and supersedes older routeToken values in the conversation.',
+    'This routeToken is stable for this conversation and persists across turns.',
     'For files generated on this execution client, read the file and send it through the MCP file object: { fileName, mimeType, base64 }. Do not answer only with a local filesystem path.',
     'Use the MCP url input only for HTTP(S) URLs reachable from the TLive MCP server process.',
     '</tlive_file_delivery>',

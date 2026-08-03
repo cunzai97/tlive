@@ -1,4 +1,5 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { getTliveHome } from '../../shared/core/path.js';
 import type { FileAttachment } from '../../shared/providers/types.js';
@@ -25,10 +26,8 @@ export function preparePromptWithImages(
       if (att.type !== 'image') continue;
       const ext =
         att.mimeType === 'image/png' ? '.png' : att.mimeType === 'image/gif' ? '.gif' : '.jpg';
-      const filePath = join(
-        imgDir,
-        `img-${Date.now()}-${Math.random().toString(36).slice(2, 6)}${ext}`,
-      );
+      const digest = createHash('sha1').update(att.base64Data).digest('hex').slice(0, 12);
+      const filePath = join(imgDir, `img-${digest}${ext}`);
       writeFileSync(filePath, Buffer.from(att.base64Data, 'base64'));
       imagePaths.push(filePath);
     }

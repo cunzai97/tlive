@@ -1,4 +1,5 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { extname, join } from 'node:path';
 import type { BridgeStore } from '../store/interface.js';
 import type { AgentSettingSource } from '../../shared/config.js';
@@ -71,7 +72,8 @@ function persistFileAttachment(att: FileAttachment, decodedBuffer: Buffer): stri
     const day = new Date().toISOString().slice(0, 10);
     const dir = join(getTliveHome(), 'attachments', day);
     mkdirSync(dir, { recursive: true });
-    const fileName = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${safeFileName(att.name)}`;
+    const digest = createHash('sha1').update(decodedBuffer).digest('hex').slice(0, 12);
+    const fileName = `${digest}-${safeFileName(att.name)}`;
     const filePath = join(dir, fileName);
     writeFileSync(filePath, decodedBuffer);
     return filePath;
