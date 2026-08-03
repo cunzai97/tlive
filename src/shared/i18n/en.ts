@@ -95,6 +95,7 @@ export const en: Translations = {
   // --- newSession ---
   'newSession.title': '✅ **New Session**',
   'newSession.feedbackText': '🆕 Old session preserved, new session started',
+  'newSession.resetFeedbackText': '🔄 Session reset, context cleared',
 
   // --- taskSummary ---
   'taskSummary.title': '✅ **Task Summary**',

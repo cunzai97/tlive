@@ -27,6 +27,12 @@ export class FeishuStreamingSession {
   private updateQueue: Promise<void> = Promise.resolve();
   private throttleMs = 250;
   private lastUpdateTime = 0;
+  /**
+   * 飞书 CardKit 流式更新的内容大小限制。
+   * 实际限制约 27KB，保守设为 20KB 避免触发 230099 等格式错误。
+   */
+  private readonly MAX_STREAMING_CONTENT_BYTES = 20 * 1024;
+  private readonly CONTINUATION_SUFFIX = '\n\n--- (内容继续中...) ---';
 
   constructor(options: FeishuStreamingOptions) {
     this.client = options.client;
@@ -123,11 +129,19 @@ export class FeishuStreamingSession {
       }
 
       this.sequence++;
+
+      // 防止内容过大触发飞书格式错误：超出限制时截断并添加续传提示
+      const contentBytes = Buffer.byteLength(fullText, 'utf8');
+      const contentToSend =
+        contentBytes > this.MAX_STREAMING_CONTENT_BYTES
+          ? this.truncateForStreaming(fullText)
+          : fullText;
+
       try {
         await this.client.cardkit.v1.cardElement.content({
           path: { card_id: this.cardId!, element_id: 'content' },
           data: {
-            content: fullText,
+            content: contentToSend,
             sequence: this.sequence,
             uuid: `s_${this.cardId}_${this.sequence}`,
           },
@@ -139,6 +153,48 @@ export class FeishuStreamingSession {
     });
 
     await this.updateQueue;
+  }
+
+  /**
+   * 截断超长内容，保留开头部分并添加续传提示。
+   * 截断策略：
+   * 1. 优先按段落边界截断（\n\n）
+   * 2. 单个段落超长则按行截断
+   * 3. 最后添加续传提示
+   */
+  private truncateForStreaming(text: string): string {
+    const suffixBytes = Buffer.byteLength(this.CONTINUATION_SUFFIX, 'utf8');
+    const availableBytes = this.MAX_STREAMING_CONTENT_BYTES - suffixBytes;
+
+    // 尝试按段落截断
+    const paragraphs = text.split(/\n{2,}/);
+    let result = '';
+    for (const para of paragraphs) {
+      const paraBytes = Buffer.byteLength(para, 'utf8');
+      const separator = result ? '\n\n' : '';
+      const additionBytes = Buffer.byteLength(separator + para, 'utf8');
+      if (result && Buffer.byteLength(result, 'utf8') + additionBytes > availableBytes) {
+        break;
+      }
+      result += separator + para;
+    }
+
+    // 如果单个段落就超长，按行截断
+    if (!result) {
+      const firstPara = paragraphs[0] || text;
+      const lines = firstPara.split('\n');
+      result = '';
+      for (const line of lines) {
+        const lineBytes = Buffer.byteLength(line, 'utf8');
+        const separator = result ? '\n' : '';
+        if (Buffer.byteLength(result, 'utf8') + Buffer.byteLength(separator + line, 'utf8') > availableBytes) {
+          break;
+        }
+        result += separator + line;
+      }
+    }
+
+    return result + this.CONTINUATION_SUFFIX;
   }
 
   /** Close streaming mode and optionally update header. */

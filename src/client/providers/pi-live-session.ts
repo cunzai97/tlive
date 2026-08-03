@@ -10,6 +10,7 @@ import {
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { PiAdapter } from './pi-adapter.js';
+import { createPiAskBridge } from './pi-ask-bridge.js';
 import type { CanonicalEvent } from '../../shared/canonical/schema.js';
 import type {
   AgentRuntimeInfo,
@@ -21,6 +22,7 @@ import type {
   StreamChatResult,
   TurnParams,
 } from '../../shared/providers/base.js';
+import type { AskUserQuestionHandler } from '../../shared/providers/types.js';
 import type { EffortLevel } from '../../shared/providers/effort.js';
 import { expandTilde } from '../../shared/core/path.js';
 import type { PiRuntimeOptions, PiThinkingLevel } from './pi-config.js';
@@ -46,6 +48,8 @@ export class PiLiveSession implements LiveSession {
   private _isTurnActive = false;
   private _runtimeInfo: AgentRuntimeInfo = { provider: 'pi', displayName: 'Pi' };
   private sdkSessionId: string | undefined;
+  /** AskUserQuestion handler from the current turn — used to bridge Pi's `ask` tool to Feishu */
+  private _turnAskQuestionHandler: AskUserQuestionHandler | undefined;
 
   constructor(private readonly options: PiSessionOptions) {
     this.sdkSessionId = options.sessionId;
@@ -73,6 +77,8 @@ export class PiLiveSession implements LiveSession {
   startTurn(prompt: string, params?: TurnParams): StreamChatResult {
     if (!this._isAlive) throw new Error('Session is closed');
     if (this.activeTurn) throw new Error('Pi session already has an active turn');
+
+    this._turnAskQuestionHandler = params?.onAskUserQuestion;
 
     const context = this.createTurnContext();
     const controls: QueryControls = {
@@ -147,6 +153,12 @@ export class PiLiveSession implements LiveSession {
         sessionId: this.sdkSessionId ?? '',
         ...(this._runtimeInfo.model ? { model: this._runtimeInfo.model } : {}),
       });
+      // Bind the ask bridge UIContext so Pi's `ask` tool routes through Feishu
+      await session.bindExtensions({
+        uiContext: createPiAskBridge(this._turnAskQuestionHandler, context.abortController.signal),
+        mode: 'print',
+      });
+
       unsubscribe = session.subscribe((event) => {
         for (const mapped of context.adapter.mapEvent(event)) {
           this.enqueueTurnEvent(context, mapped);
@@ -165,6 +177,21 @@ export class PiLiveSession implements LiveSession {
         model: this._runtimeInfo.model,
         reasoningEffort: this._runtimeInfo.reasoningEffort,
       });
+      // Emit context usage BEFORE mapComplete so it's available when footer is rendered
+      const ctxUsage = session.getContextUsage();
+      if (ctxUsage) {
+        console.log(
+          `[pi] contextUsage: tokens=${ctxUsage.tokens} window=${ctxUsage.contextWindow} percent=${ctxUsage.percent}%`,
+        );
+        this.enqueueTurnEvent(context, {
+          kind: 'context_usage',
+          tokens: ctxUsage.tokens,
+          contextWindow: ctxUsage.contextWindow,
+          percent: ctxUsage.percent,
+        });
+      } else {
+        console.log(`[pi] contextUsage: undefined (model=${session.model?.id ?? 'none'}, window=${session.model?.contextWindow ?? 0})`);
+      }
       for (const mapped of context.adapter.mapComplete(session.messages)) {
         this.enqueueTurnEvent(context, mapped);
       }
@@ -175,6 +202,7 @@ export class PiLiveSession implements LiveSession {
     } finally {
       unsubscribe?.();
       this.finishTurnContext(context);
+      this._turnAskQuestionHandler = undefined;
     }
   }
 

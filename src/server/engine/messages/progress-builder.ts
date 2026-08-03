@@ -13,6 +13,16 @@ import { t, type Locale } from '../../../shared/i18n/index.js';
 
 const SEPARATOR = '───────────────';
 
+function formatContextUsage(ctx: { tokens: number | null; contextWindow: number; percent: number | null }): string {
+  if (ctx.contextWindow <= 0) return '';
+  const tokensStr = ctx.tokens !== null
+    ? (ctx.tokens >= 1000 ? `${(ctx.tokens / 1000).toFixed(1)}k` : `${ctx.tokens}`)
+    : '?';
+  const windowStr = ctx.contextWindow >= 1000 ? `${(ctx.contextWindow / 1000).toFixed(0)}k` : `${ctx.contextWindow}`;
+  const percentStr = ctx.percent !== null ? ` ${Math.round(ctx.percent)}%` : '';
+  return `🧠 ${tokensStr}/${windowStr}${percentStr}`;
+}
+
 /** Input state for rendering */
 export interface RenderInput {
   phase: 'starting' | 'executing' | 'waiting_permission' | 'completed' | 'failed';
@@ -42,6 +52,8 @@ export interface RenderInput {
   cwd?: string;
   sessionId?: string;
   usageSummary?: string;
+  /** Context window usage (tokens, window size, percentage) */
+  contextUsage?: { tokens: number | null; contextWindow: number; percent: number | null };
   platformLimit: number;
   /** Session info from SDK init */
   sessionInfo?: {
@@ -131,6 +143,7 @@ export class ProgressContentBuilder {
       sessionInfo: input.sessionInfo,
       toolUseSummaryText: input.toolUseSummaryText,
       usageSummary: input.usageSummary,
+      contextUsage: input.contextUsage,
       apiRetry: input.apiRetry,
       compacting: input.compacting,
     };
@@ -156,6 +169,9 @@ export class ProgressContentBuilder {
     const lines: string[] = [];
     if (parts.length > 0) lines.push(parts.join(' │ '));
     if (input.usageSummary) lines.push(input.usageSummary);
+    if (input.contextUsage) {
+      lines.push(formatContextUsage(input.contextUsage));
+    }
     return lines.join('\n');
   }
 
@@ -316,6 +332,7 @@ export function buildProgressData(
     sessionInfo: state.sessionInfo,
     toolUseSummaryText: state.toolUseSummaryText,
     usageSummary: state.usageSummary,
+    contextUsage: state.contextUsage,
     apiRetry: state.apiRetry,
     compacting: state.compacting,
     actionButtons: buttons,

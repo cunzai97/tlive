@@ -62,6 +62,14 @@ const HIDDEN_TOOLS = new Set([
 /** Split thresholds */
 const SPLIT_TOOL_THRESHOLD = 12;
 const SPLIT_TIMELINE_THRESHOLD = 18;
+/**
+ * 单气泡内容大小阈值（字节数）。
+ * 仅在没有 shouldSplitState adapter hook 时作为 fallback。
+ * 有 adapter hook 时由 shouldSplitProgressMessage 检查实际卡片 JSON 大小。
+ */
+const SPLIT_CONTENT_BYTES_THRESHOLD = 10 * 1024; // 10KB fallback 阈值
+const SPLIT_CONTENT_EXPANSION_FACTOR = 2.0; // JSON 膨胀系数
+const SPLIT_ESTIMATED_CARD_LIMIT = 20 * 1024; // 预估卡片上限 20KB
 
 export class MessageRenderer {
   // State collection
@@ -113,6 +121,7 @@ export class MessageRenderer {
   private reasoningEffort?: string;
   private sessionId?: string;
   private usageSummary?: string;
+  private contextUsage?: { tokens: number | null; contextWindow: number; percent: number | null };
   private verboseLevel: VerboseLevel;
   private onFlushError?: MessageRendererOptions['onFlushError'];
   private shouldSplitState?: MessageRendererOptions['shouldSplitState'];
@@ -259,6 +268,10 @@ export class MessageRenderer {
     this.compacting = active;
     this.forceFlush = true;
     this.scheduleFlush();
+  }
+
+  onContextUsage(data: { tokens: number | null; contextWindow: number; percent: number | null }): void {
+    this.contextUsage = data;
   }
 
   onToolComplete(_toolUseId: string): void {
@@ -412,6 +425,7 @@ export class MessageRenderer {
       cwd: this.cwd,
       sessionId: this.sessionId,
       usageSummary: this.usageSummary,
+      contextUsage: this.contextUsage,
       platformLimit: this.platformLimit,
       sessionInfo: this.sessionInfo,
       toolUseSummaryText: this.toolUseSummaryText,
@@ -574,14 +588,22 @@ export class MessageRenderer {
     const defaultSplit =
       this.bubbleToolCount >= SPLIT_TOOL_THRESHOLD ||
       this.bubbleTimelineCount >= SPLIT_TIMELINE_THRESHOLD;
+
+    // 基于实际卡片 JSON 字节数的 split（精确，优先使用）。
+    // 估算的文本字节数仅在没有 adapter hook 时作为 fallback。
+    const content = this.contentBuilder.render(this.getRenderInput());
+    const contentBytes = Buffer.byteLength(content, 'utf8');
+    const estimatedCardBytes = contentBytes * SPLIT_CONTENT_EXPANSION_FACTOR;
+    const estimatedContentTooLarge =
+      contentBytes > SPLIT_CONTENT_BYTES_THRESHOLD ||
+      estimatedCardBytes > SPLIT_ESTIMATED_CARD_LIMIT;
+
     if (this.shouldSplitState) {
-      const state = this.contentBuilder.getStateSnapshot(
-        this.getRenderInput(),
-        this.contentBuilder.render(this.getRenderInput()),
-      );
+      // 精确检查：用实际卡片 JSON 大小，避免过早分割
+      const state = this.contentBuilder.getStateSnapshot(this.getRenderInput(), content);
       return defaultSplit || this.shouldSplitState(state);
     }
-    return defaultSplit;
+    return defaultSplit || estimatedContentTooLarge;
   }
 }
 

@@ -61,6 +61,12 @@ export function downgradeHeadings(text: string): string {
 /** Maximum rows per table in Feishu card (platform limit ~10) */
 const MAX_TABLE_ROWS = 10;
 
+/** Maximum number of tables in a Feishu card (platform hard limit) */
+const MAX_TABLES_PER_CARD = 5;
+
+/** Match a markdown table: header + separator + data rows */
+const TABLE_REGEX = /^(\|.*\|)\n(\|[-:| ]+\|)\n((?:\|.*\|\n?)+)/gm;
+
 /**
  * Split large markdown tables into multiple smaller tables.
  * Feishu cards have a limit on table rows (~10). This function:
@@ -69,23 +75,14 @@ const MAX_TABLE_ROWS = 10;
  * 3. Adds a separator hint between split tables
  */
 export function splitLargeTables(text: string, _locale: Locale = 'zh'): string {
-  // Match markdown tables: header row + separator + data rows
-  // Table pattern: | cell | cell | ... | followed by |---|---|...| and data rows
-  const tableRegex = /^(\|.*\|)\n(\|[-:| ]+\|)\n((?:\|.*\|\n?)+)/gm;
-
-  return text.replace(tableRegex, (match, headerRow, separatorRow, dataRows) => {
-    // Parse data rows
+  return text.replace(TABLE_REGEX, (match, headerRow, separatorRow, dataRows) => {
     const rows = dataRows
       .trim()
       .split('\n')
       .filter((r: string) => r.trim().startsWith('|'));
 
-    if (rows.length <= MAX_TABLE_ROWS) {
-      // Table is within limit, keep as-is
-      return match;
-    }
+    if (rows.length <= MAX_TABLE_ROWS) return match;
 
-    // Split into multiple tables
     const tables: string[] = [];
     const header = `${headerRow}\n${separatorRow}\n`;
 
@@ -94,11 +91,9 @@ export function splitLargeTables(text: string, _locale: Locale = 'zh'): string {
       const chunkIndex = Math.floor(i / MAX_TABLE_ROWS);
       const totalChunks = Math.ceil(rows.length / MAX_TABLE_ROWS);
 
-      // First chunk keeps original header, subsequent chunks show continuation hint
       if (chunkIndex === 0) {
         tables.push(header + chunk.join('\n'));
       } else {
-        // Add continuation hint as table note
         const hint =
           t('markdown.tableChunk')
             .replace('{index}', String(chunkIndex + 1))
@@ -107,7 +102,60 @@ export function splitLargeTables(text: string, _locale: Locale = 'zh'): string {
       }
     }
 
-    // Add separator between tables
     return tables.join('\n\n---\n\n');
   });
+}
+
+/**
+ * Split content by table count so each chunk has at most MAX_TABLES_PER_CARD tables.
+ * Returns an array of text chunks. Each chunk (except the first) starts with a
+ * continuation hint. Used to avoid Feishu API error 230099 (card table number over limit).
+ */
+export function splitByTableCount(text: string): string[] {
+  const tablePositions: number[] = [];
+  let match;
+  const regex = new RegExp(TABLE_REGEX);
+
+  while ((match = regex.exec(text)) !== null) {
+    tablePositions.push(match.index);
+  }
+
+  if (tablePositions.length <= MAX_TABLES_PER_CARD) {
+    return [text];
+  }
+
+  const chunks: string[] = [];
+  let start = 0;
+  let tableIndex = 0;
+
+  for (let i = 0; i < tablePositions.length; i++) {
+    // If adding this table would exceed the limit, split before it
+    if (i - tableIndex >= MAX_TABLES_PER_CARD) {
+      const chunkText = text.slice(start, tablePositions[i]).trim();
+      if (chunkText) {
+        chunks.push(chunkText);
+      }
+
+      // Start new chunk from this table
+      start = tablePositions[i];
+      tableIndex = i;
+    }
+  }
+
+  // Add remaining text after last split point
+  if (start < text.length) {
+    const remaining = text.slice(start).trim();
+    if (remaining) chunks.push(remaining);
+  }
+
+  // Add continuation hint to chunks after the first
+  if (chunks.length > 0) {
+    const result: string[] = [chunks[0]];
+    for (let i = 1; i < chunks.length; i++) {
+      result.push(`**表格（续）**\n\n` + chunks[i]);
+    }
+    return result;
+  }
+
+  return chunks;
 }

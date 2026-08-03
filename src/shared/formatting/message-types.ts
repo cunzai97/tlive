@@ -392,6 +392,8 @@ export interface ProgressData {
   toolUseSummaryText?: string;
   /** Formatted usage/cost summary shown in run info. */
   usageSummary?: string;
+  /** Context window usage (tokens, window size, percentage) */
+  contextUsage?: { tokens: number | null; contextWindow: number; percent: number | null };
   /** API retry state */
   apiRetry?: {
     attempt: number;

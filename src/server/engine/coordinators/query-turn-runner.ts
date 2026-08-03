@@ -59,7 +59,10 @@ export class QueryTurnRunner {
     const imageAttachments = msg.attachments?.filter((a) => a.type === 'image');
     const provider = this.options.providers.require(binding.provider);
     const basePromptText = preparePromptWithFileAttachments(msg.text, msg.attachments);
-    const promptText = this.withFileDeliveryContext(basePromptText, msg, sessionKey, workdir);
+    // Don't prepend file delivery context for slash commands - let the agent handle them
+    const promptText = basePromptText.startsWith('/')
+      ? basePromptText
+      : this.withFileDeliveryContext(basePromptText, msg, sessionKey, workdir);
 
     let streamResult: StreamChatResult | undefined;
     let terminalEventSeen = false;
@@ -166,6 +169,12 @@ export class QueryTurnRunner {
             `[bridge] compact_boundary: trigger=${data.trigger}${data.preTokens ? ` pre_tokens=${data.preTokens}` : ''}`,
           );
           renderer.onCompacting(true);
+        },
+        onContextUsage: (data) => {
+          console.log(
+            `[bridge] context_usage: tokens=${data.tokens ?? '?'} window=${data.contextWindow} percent=${data.percent != null ? `${Math.round(data.percent)}%` : '?'}`,
+          );
+          renderer.onContextUsage(data);
         },
         onRateLimit: (data) => {
           if (data.status === 'rejected') {

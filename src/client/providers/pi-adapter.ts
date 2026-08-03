@@ -196,6 +196,10 @@ function usageFromMessages(messages: unknown[]): {
     costUsd += numberValue(typed.usage.cost?.total);
   }
 
+  console.log(
+    `[pi-adapter] usageFromMessages: input=${inputTokens} output=${outputTokens} cached=${cachedInputTokens} cost=${costUsd.toFixed(4)}$`,
+  );
+
   return {
     inputTokens,
     outputTokens,

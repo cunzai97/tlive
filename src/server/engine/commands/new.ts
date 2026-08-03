@@ -27,14 +27,15 @@ export class NewCommand extends BaseCommand {
   readonly helpCategory = 'session' as const;
   readonly description = '新建会话';
   readonly helpDesc = '在工作台中新建一个话题会话；可用 /new <engine> 选择执行引擎。';
-  readonly helpExample = '/new <engine>';
+  readonly helpExample = '/new <engine> <标题>';
 
   async execute(ctx: CommandContext): Promise<boolean> {
     const scopeId = ctx.scopeId;
     const previousBinding = await ctx.services.store.getBinding(ctx.msg.channelType, scopeId);
+    const customTitle = extractCustomTitle(ctx);
     const providerChoice = await this.resolveProviderChoice(ctx, previousBinding);
     if (!providerChoice) return true;
-    const clientChoice = await this.resolveClientChoice(ctx, previousBinding);
+    const clientChoice = await this.resolveClientChoice(ctx, previousBinding, customTitle !== undefined);
     if (!clientChoice) return true;
     const hadActiveSession = previousBinding
       ? (ctx.services.sdkEngine?.hasSessionContext?.(
@@ -54,9 +55,25 @@ export class NewCommand extends BaseCommand {
         newSessionId,
         providerChoice,
         clientChoice,
+        customTitle,
       )
     ) {
       return true;
+    }
+
+    // In a topic: reset the current session context instead of creating a new topic
+    if (ctx.surface === 'topic' && previousBinding?.sessionId) {
+      const sessionKey = ctx.services.state.stateKey(
+        ctx.msg.channelType,
+        scopeId,
+        previousBinding.sessionId,
+      );
+      ctx.services.sdkEngine?.cleanupSession(
+        ctx.msg.channelType,
+        ctx.msg.chatId,
+        'reset',
+        previousBinding.cwd,
+      );
     }
 
     await ctx.services.router.rebind(ctx.msg.channelType, scopeId, newSessionId, {
@@ -74,7 +91,11 @@ export class NewCommand extends BaseCommand {
 
     ctx.services.state.clearLastActive(ctx.msg.channelType, scopeId);
 
-    const feedbackText = hadActiveSession ? t('newSession.feedbackText') : undefined;
+    const feedbackText = ctx.surface === 'topic'
+      ? t('newSession.resetFeedbackText')
+      : hadActiveSession
+        ? t('newSession.feedbackText')
+        : undefined;
     await this.send(
       ctx,
       presentNewSession(ctx.msg.chatId, {
@@ -94,9 +115,10 @@ export class NewCommand extends BaseCommand {
   private async resolveClientChoice(
     ctx: CommandContext,
     previousBinding: ChannelBinding | null,
+    hasCustomTitle?: boolean,
   ): Promise<NewSessionClientChoice | null> {
     const clients = ctx.services.getExecutionClients?.() ?? [];
-    const requested = ctx.parts[2]?.trim();
+    const requested = !hasCustomTitle ? ctx.parts[2]?.trim() : undefined;
     if (requested) {
       const client = clients.find((entry) => entry.clientId === requested);
       if (!client) {
@@ -167,9 +189,10 @@ export class NewCommand extends BaseCommand {
     newSessionId: string,
     providerChoice: NewSessionProviderChoice,
     clientChoice: NewSessionClientChoice,
+    customTitle?: string,
   ): Promise<boolean> {
     const cwd = clientChoice.cwd || previousBinding?.cwd || ctx.services.defaultWorkdir;
-    const title = buildNewTopicTitle(providerChoice.displayName, cwd, clientChoice.clientId);
+    const title = customTitle || buildNewTopicTitle(providerChoice.displayName, cwd, clientChoice.clientId);
     const createdAt = new Date().toISOString();
     const intro = buildTopicEntryText({
       channelType: ctx.msg.channelType,
@@ -226,6 +249,16 @@ export class NewCommand extends BaseCommand {
     });
     return true;
   }
+}
+
+/** Extract custom topic title: /new pi <title> -> title */
+function extractCustomTitle(ctx: CommandContext): string | undefined {
+  if (ctx.parts.length < 3) return undefined;
+  const providerToken = ctx.parts[1]?.trim().toLowerCase();
+  const isKnownProvider =
+    providerToken === 'claude' || providerToken === 'codex' || providerToken === 'pi';
+  if (!isKnownProvider) return undefined;
+  return ctx.parts.slice(2).join(' ').trim() || undefined;
 }
 
 function currentCwdForClient(binding: ChannelBinding | null, clientId?: string): string | undefined {

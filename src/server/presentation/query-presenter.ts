@@ -1,7 +1,7 @@
 import type { BaseChannelAdapter } from '../channels/base.js';
 import type { InboundMessage, RenderedMessage } from '../channels/types.js';
 import type { TaskSummaryData } from '../../shared/formatting/message-types.js';
-import { chunkByParagraph } from '../../shared/formatting/text-chunk.js';
+import { chunkByParagraphBytes } from '../../shared/formatting/text-chunk.js';
 import type { MessageRendererState } from '../engine/messages/renderer.js';
 import type { TimelineEntry } from '../engine/messages/renderer-types.js';
 import { truncate } from '../../shared/core/string.js';
@@ -121,8 +121,16 @@ export class QueryExecutionPresenter {
       return result.messageId;
     }
 
-    if (content.length > this.platformLimit) {
-      const chunks = chunkByParagraph(content, this.platformLimit);
+    // 分块检查：渲染后的文本过大时降级为纯文本分块发送。
+    // 注意：shouldSplitBubble 已通过 shouldSplitState 精确检查实际卡片大小，
+    // 这里的检查是最后的兜底安全网，阈值与纯文本保持一致即可。
+    const isProgressCard = !!state;
+    const contentBytes = Buffer.byteLength(content, 'utf8');
+    const effectiveLimitBytes = this.platformLimit;
+
+    if (contentBytes > effectiveLimitBytes) {
+      const chunkByteSize = this.platformLimit;
+      const chunks = chunkByParagraphBytes(content, chunkByteSize);
       const firstMessage = withInboundReplyContext(
         this.adapter.formatContent(this.inbound.chatId, chunks[0]),
         this.inbound,
@@ -139,7 +147,35 @@ export class QueryExecutionPresenter {
       return fallbackMessageId;
     }
 
-    return this.editExistingOrSend(outMsg);
+    try {
+      return await this.editExistingOrSend(outMsg);
+    } catch (err: any) {
+      // 编辑/发送失败，尝试分块重试
+      const retryChunkSize = this.platformLimit;
+      if (contentBytes > retryChunkSize) {
+        console.warn(
+          `[presenter] flush failed (${isProgressCard ? 'progress' : 'plain'} card), retrying with chunked content (${contentBytes} bytes)`,
+        );
+        const chunks = chunkByParagraphBytes(content, retryChunkSize);
+        const firstMessage = withInboundReplyContext(
+          this.adapter.formatContent(this.inbound.chatId, chunks[0]),
+          this.inbound,
+        );
+        const fallbackMessageId = await this.adapter.send(firstMessage);
+        this.clearTyping();
+        if (fallbackMessageId.messageId) this.onMessageId?.(fallbackMessageId.messageId);
+        for (let i = 1; i < chunks.length; i++) {
+          await this.adapter.send(
+            withInboundReplyContext(
+              this.adapter.formatContent(this.inbound.chatId, chunks[i]),
+              this.inbound,
+            ),
+          );
+        }
+        return fallbackMessageId.messageId;
+      }
+      throw err;
+    }
   }
 
   async dispose(): Promise<void> {}
@@ -190,10 +226,20 @@ export class QueryExecutionPresenter {
       return;
     } catch (err: any) {
       if (err?.retryable) throw err;
-      const result = await this.adapter.send(message);
-      this.clearTyping();
-      if (result.messageId) this.onMessageId?.(result.messageId);
-      return result.messageId;
+      // 编辑失败，尝试发送新消息
+      try {
+        const result = await this.adapter.send(message);
+        this.clearTyping();
+        if (result.messageId) this.onMessageId?.(result.messageId);
+        return result.messageId;
+      } catch (sendErr: any) {
+        // 发送也失败（可能是内容过大），记录警告但不抛出错误
+        // 上层 flush() 会处理分块重试
+        console.warn(
+          `[presenter] editExistingOrSend: both edit and send failed, content may be too large. ${sendErr?.message ?? sendErr}`,
+        );
+        throw sendErr;
+      }
     }
   }
 

@@ -1,7 +1,7 @@
 import type { Client } from '@larksuiteoapi/node-sdk';
 import type { SendResult, ThreadStartResult } from '../types.js';
 import type { BridgeError } from '../errors.js';
-import { markdownToFeishu, downgradeHeadings } from './markdown.js';
+import { markdownToFeishu, downgradeHeadings, splitLargeTables, splitByTableCount } from './markdown.js';
 import { buildFeishuCard, buildFeishuButtonElements } from './card-builder.js';
 import type { FeishuCardElement } from './card-builder.js';
 import type { FeishuRenderedMessage } from './types.js';
@@ -10,6 +10,12 @@ import { Logger } from '../../../shared/logger.js';
 import { chunkByParagraph } from '../../../shared/formatting/text-chunk.js';
 
 const FEISHU_PROGRESS_SPLIT_BYTES = 27 * 1024;
+/**
+ * 单个气泡的文本内容上限（字符数）。
+ * 飞书实际限制约 30KB，但进度卡片包含大量元数据（thinking、tool logs、timeline）。
+ * 保守设为 12KB，确保 JSON 包装后不超限。
+ */
+const FEISHU_CHUNK_LIMIT = 12000;
 
 /** Shape of the Feishu message.create/reply API response */
 interface FeishuCreateMessageResult {
@@ -51,9 +57,18 @@ export async function sendFeishuMessage(
     }
   }
 
-  const chunks = chunkByParagraph(raw, 25000);
+  // Step 1: split by table count (each chunk ≤ 5 tables) to avoid Feishu card table limit
+  const tableChunks = splitByTableCount(raw);
 
-  if (chunks.length === 1) {
+  // Step 2: within each table chunk, apply paragraph-based chunking
+  // 使用 FEISHU_CHUNK_LIMIT (20KB) 而非 25KB，为 JSON 包装预留空间
+  const allChunks: string[] = [];
+  for (const tc of tableChunks) {
+    const paraChunks = chunkByParagraph(tc, FEISHU_CHUNK_LIMIT);
+    allChunks.push(...paraChunks);
+  }
+
+  if (allChunks.length === 1) {
     try {
       const cardContent = buildCardForMessage(message, raw);
       const result = await sendMessageContent(client, message, 'interactive', cardContent);
@@ -63,10 +78,10 @@ export async function sendFeishuMessage(
     }
   }
 
-  const firstMessageId = await sendSingleFeishuMessage(client, message, chunks[0], classifyError);
-  for (let i = 1; i < chunks.length; i++) {
-    const hint = `**气泡 ${i + 1}/${chunks.length}**\n`;
-    await sendSingleFeishuMessage(client, message, hint + chunks[i], classifyError);
+  const firstMessageId = await sendSingleFeishuMessage(client, message, allChunks[0], classifyError);
+  for (let i = 1; i < allChunks.length; i++) {
+    const hint = `**气泡 ${i + 1}/${allChunks.length}**\n`;
+    await sendSingleFeishuMessage(client, message, hint + allChunks[i], classifyError);
   }
   return { messageId: firstMessageId, success: true };
 }
@@ -94,16 +109,26 @@ export async function editFeishuMessage(
 ): Promise<void> {
   if (!client) return;
   const text = message.text ? message.text : markdownToFeishu(message.html ?? '');
-  const chunks = chunkByParagraph(text, 25000);
 
-  if (chunks.length === 1) {
+  // Step 1: split by table count (each chunk ≤ 5 tables)
+  const tableChunks = splitByTableCount(text);
+
+  // Step 2: within each table chunk, apply paragraph-based chunking
+  // 使用 FEISHU_CHUNK_LIMIT (20KB) 而非 25KB，为 JSON 包装预留空间
+  const allChunks: string[] = [];
+  for (const tc of tableChunks) {
+    const paraChunks = chunkByParagraph(tc, FEISHU_CHUNK_LIMIT);
+    allChunks.push(...paraChunks);
+  }
+
+  if (allChunks.length === 1) {
     try {
       await client.im.message.patch({
         path: { message_id: messageId },
         data: {
           content: message.feishuElements
             ? buildStructuredCardForMessage(message)
-            : buildPlainCard(chunks[0], message.buttons, message.feishuHeader),
+            : buildPlainCard(allChunks[0], message.buttons, message.feishuHeader),
         },
       });
     } catch (err: any) {
@@ -121,19 +146,19 @@ export async function editFeishuMessage(
     data: {
       content: message.feishuElements
         ? buildStructuredCardForMessage(message)
-        : buildPlainCard(chunks[0], message.buttons, message.feishuHeader),
+        : buildPlainCard(allChunks[0], message.buttons, message.feishuHeader),
     },
   });
 
-  for (let i = 1; i < chunks.length; i++) {
-    const hint = `**气泡 ${i + 1}/${chunks.length}**\n`;
+  for (let i = 1; i < allChunks.length; i++) {
+    const hint = `**气泡 ${i + 1}/${allChunks.length}**\n`;
     const result = await sendMessageContent(
       client,
-      { ...message, text: hint + chunks[i] },
+      { ...message, text: hint + allChunks[i] },
       'interactive',
-      buildCardForMessage({ ...message, text: hint + chunks[i] }, hint + chunks[i]),
+      buildCardForMessage({ ...message, text: hint + allChunks[i] }, hint + allChunks[i]),
     );
-    console.log(`[feishu] Sent chunk ${i + 1}/${chunks.length}: ${result?.data?.message_id}`);
+    console.log(`[feishu] Sent chunk ${i + 1}/${allChunks.length}: ${result?.data?.message_id}`);
   }
 }
 
@@ -315,7 +340,7 @@ function buildPlainCard(
   buttons?: FeishuRenderedMessage['buttons'],
   header?: { template: string; title: string },
 ): string {
-  const elements: FeishuCardElement[] = [{ tag: 'markdown', content: downgradeHeadings(text) }];
+  const elements: FeishuCardElement[] = [{ tag: 'markdown', content: downgradeHeadings(splitLargeTables(text)) }];
   elements.push(...buildFeishuButtonElements(buttons));
 
   return buildFeishuCard({

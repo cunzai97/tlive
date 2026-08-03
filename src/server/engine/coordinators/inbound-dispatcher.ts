@@ -31,6 +31,7 @@ const TOPIC_TLIVE_COMMANDS = new Set([
   '/home-dir',
   '/client-upgrade',
   '/continue',
+  '/new',
 ]);
 
 /**

@@ -66,6 +66,7 @@ describe('PiLiveSession', () => {
         listeners.push(listener);
         return () => {};
       }),
+      bindExtensions: vi.fn(),
       prompt: vi.fn(async () => {
         for (const listener of listeners) {
           listener({
@@ -127,6 +128,7 @@ describe('PiLiveSession', () => {
       thinkingLevel: 'off',
       messages: [],
       subscribe: vi.fn(() => () => {}),
+      bindExtensions: vi.fn(),
       prompt: vi.fn(),
       steer: vi.fn(),
       followUp: vi.fn(),
@@ -157,6 +159,7 @@ describe('PiLiveSession', () => {
       thinkingLevel: 'off',
       messages: [],
       subscribe: vi.fn(() => () => {}),
+      bindExtensions: vi.fn(),
       prompt: vi.fn(),
       steer: vi.fn(),
       followUp: vi.fn(),

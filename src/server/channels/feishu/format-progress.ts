@@ -7,7 +7,7 @@ import { t } from '../../../shared/i18n/index.js';
 import type { FeishuCardElement } from './card-builder.js';
 import type { ProgressData } from '../../../shared/formatting/message-types.js';
 import { truncate } from '../../../shared/core/string.js';
-import { downgradeHeadings } from './markdown.js';
+import { downgradeHeadings, splitLargeTables } from './markdown.js';
 import { collapsiblePanel, dividerElement, markdownElement } from './card-elements.js';
 
 type TimelineToolDisplay = {
@@ -317,7 +317,7 @@ export function buildProgressContentElements(params: FormatProgressParams): Feis
     if (!data.completedTraceOnly) {
       const completedBody = extractCompletedBody(data);
       if (completedBody) {
-        elements.push(md(downgradeHeadings(truncate(completedBody, 3000))));
+        elements.push(md(downgradeHeadings(truncate(splitLargeTables(completedBody), 25000))));
       }
     }
   } else if (data.phase === 'waiting_permission' && data.permission) {

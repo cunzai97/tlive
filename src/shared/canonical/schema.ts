@@ -135,6 +135,13 @@ const rateLimitSchema = z.object({
   resetsAt: z.number().optional(),
 });
 
+const contextUsageSchema = z.object({
+  kind: z.literal('context_usage'),
+  tokens: z.number().nullable(),
+  contextWindow: z.number(),
+  percent: z.number().nullable(),
+});
+
 export const todoStatusSchema = z.enum(['pending', 'in_progress', 'completed']);
 
 const todoUpdateSchema = z.object({
@@ -165,6 +172,7 @@ export const canonicalEventSchema = z.discriminatedUnion('kind', [
   compactBoundarySchema,
   promptSuggestionSchema,
   rateLimitSchema,
+  contextUsageSchema,
   todoUpdateSchema,
 ]);
 

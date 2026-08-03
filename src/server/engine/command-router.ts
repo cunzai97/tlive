@@ -230,6 +230,12 @@ export class CommandRouter {
       return handler.execute(ctx);
     }
 
+    // In topic surface, let unknown slash commands pass through to the agent
+    // so built-in agent commands (e.g. /model, /clear) can handle them
+    if (surface === 'topic') {
+      return false;
+    }
+
     if (!opts.requirePublicTextCommand) {
       await adapter.send(
         withInboundReplyContext(

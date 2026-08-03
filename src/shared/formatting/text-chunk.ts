@@ -1,6 +1,21 @@
 /**
+ * Split text by paragraph boundaries, using byte limits instead of character counts.
+ * Internally converts to char-based limit using the text's byte-to-char ratio.
+ *
+ * Use this when the output is validated against a size limit (e.g. Feishu cards).
+ */
+export function chunkByParagraphBytes(text: string, byteLimit: number): string[] {
+  if (!text) return [];
+  const ratio = Buffer.byteLength(text, 'utf8') / (text.length || 1);
+  const charLimit = Math.max(100, Math.floor(byteLimit / ratio));
+  return chunkByParagraph(text, charLimit);
+}
+
+/**
  * Split text by paragraph boundaries (double newlines) first, then by length.
  * Keeps paragraphs together when possible for better readability.
+ *
+ * @param limit - Character count limit (NOT bytes). Prefer chunkByParagraphBytes for byte limits.
  */
 export function chunkByParagraph(text: string, limit: number): string[] {
   if (text.length <= limit) return [text];

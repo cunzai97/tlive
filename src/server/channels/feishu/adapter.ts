@@ -7,7 +7,7 @@ import type {
   ThreadStartResult,
 } from '../types.js';
 import type { BridgeError } from '../errors.js';
-import { RateLimitError, AuthError, PlatformError } from '../errors.js';
+import { RateLimitError, AuthError, PlatformError, FormatError } from '../errors.js';
 import { FeishuStreamingSession } from './streaming.js';
 import { FeishuFormatter } from './formatter.js';
 import { FEISHU_POLICY } from './policy.js';
@@ -307,6 +307,10 @@ export class FeishuAdapter extends BaseChannelAdapter<FeishuRenderedMessage> {
       return new RateLimitError(message, readRetryAfterMs(e));
     }
     if (code === 99991401 || code === 99991403) return new AuthError(message);
+    if (code === 230099) {
+      console.warn(`[feishu] FormatError (230099): message may be too large or contain too many tables. ${message}`);
+      return new FormatError(message); // card table number over limit or content too large
+    }
     if (statusCode) return new PlatformError(message, statusCode);
 
     return super.classifyError(err);

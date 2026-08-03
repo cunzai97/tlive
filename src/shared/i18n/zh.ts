@@ -95,6 +95,7 @@ export const zh: Translations = {
   // --- newSession ---
   'newSession.title': '✅ **新会话**',
   'newSession.feedbackText': '🆕 已保留旧会话，开启新会话',
+  'newSession.resetFeedbackText': '🔄 已重置当前会话，上下文已清空',
 
   // --- taskSummary ---
   'taskSummary.title': '✅ **任务摘要**',

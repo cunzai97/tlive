@@ -185,6 +185,7 @@ interface ProcessMessageParams {
     error?: string;
   }) => void;
   onCompactBoundary?: (data: { trigger: 'manual' | 'auto'; preTokens?: number }) => void;
+  onContextUsage?: (data: { tokens: number | null; contextWindow: number; percent: number | null }) => void;
   onThinkingDelta?: (delta: string) => void;
   onTodoUpdate?: (todos: Array<{ content: string; status: TodoStatus }>) => void;
   /** Provider selected for this logical turn. */
@@ -320,6 +321,9 @@ export class ConversationEngine {
             break;
           case 'compact_boundary':
             params.onCompactBoundary?.(value);
+            break;
+          case 'context_usage':
+            params.onContextUsage?.(value);
             break;
           case 'todo_update':
             params.onTodoUpdate?.(value.todos);
