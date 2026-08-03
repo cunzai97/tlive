@@ -18,7 +18,14 @@ import {
 } from '../../../shared/core/key.js';
 
 /** Reason for closing a session — used for logging and diagnostics */
-export type SessionCleanupReason = 'new' | 'switch' | 'cd' | 'settings' | 'expire' | 'close' | 'reset';
+export type SessionCleanupReason =
+  | 'new'
+  | 'switch'
+  | 'cd'
+  | 'settings'
+  | 'expire'
+  | 'close'
+  | 'reset';
 
 /** Managed session — wraps a LiveSession with per-chat metadata */
 export interface ManagedSession {
@@ -31,6 +38,8 @@ export interface ManagedSession {
   clientId?: string;
   lastActiveAt: number;
   session?: LiveSession;
+  /** One-time prompt fragments already injected into this logical session. */
+  injectedPromptKeys?: Set<string>;
 }
 
 /** Snapshot for diagnostics and /home display */
@@ -259,6 +268,16 @@ export class SessionManager {
 
   getSessionContext(sessionKey: string): ManagedSession | undefined {
     return this.registry.get(sessionKey);
+  }
+
+  /** Return a prompt only on its first injection into this logical session. */
+  takeInitialPrompt(sessionKey: string, promptKey: string, prompt: string): string | undefined {
+    const managed = this.registry.get(sessionKey);
+    if (!managed) return prompt;
+    managed.injectedPromptKeys ??= new Set<string>();
+    if (managed.injectedPromptKeys.has(promptKey)) return undefined;
+    managed.injectedPromptKeys.add(promptKey);
+    return prompt;
   }
 
   updateSessionSdkSessionId(sessionKey: string, sdkSessionId?: string): void {

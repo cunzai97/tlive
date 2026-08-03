@@ -42,6 +42,7 @@ interface QueryOrchestratorOptions {
   defaultWorkdir: string;
   topicSessions?: TopicSessionManager;
   defaultAgentSettingSources: AgentSettingSource[];
+  maxFileDeliveryBytes?: number;
   appendSystemPrompt?: string;
   onConversationMessageResolved?: (
     msg: InboundMessage,
@@ -78,6 +79,7 @@ export class QueryOrchestrator {
       store: options.store,
       defaultWorkdir: options.defaultWorkdir,
       defaultAgentSettingSources: options.defaultAgentSettingSources,
+      maxFileDeliveryBytes: options.maxFileDeliveryBytes,
       appendSystemPrompt: options.appendSystemPrompt,
       onSdkSessionId: async (query, id) => {
         const record = this.recordTopicSession(query.msg, query.binding, { sdkSessionId: id });

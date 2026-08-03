@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { BaseChannelAdapter } from '../../server/channels/base.js';
@@ -72,6 +72,7 @@ function createPermissions(overrides: Record<string, unknown> = {}) {
 }
 
 function createSdkEngine(overrides: Record<string, unknown> = {}) {
+  const injectedPromptKeys = new Set<string>();
   return {
     getInteractionState: vi.fn().mockReturnValue({
       beginSdkQuestion: vi.fn(),
@@ -86,6 +87,12 @@ function createSdkEngine(overrides: Record<string, unknown> = {}) {
     setControlsForChat: vi.fn(),
     setActiveMessageId: vi.fn(),
     registerFileDeliveryRoute: vi.fn().mockReturnValue('route-token'),
+    takeInitialPrompt: vi.fn().mockImplementation((sessionKey: string, promptKey: string, prompt: string) => {
+      const key = `${sessionKey}:${promptKey}`;
+      if (injectedPromptKeys.has(key)) return undefined;
+      injectedPromptKeys.add(key);
+      return prompt;
+    }),
     closeSession: vi.fn(),
     getOrCreateSession: vi.fn().mockReturnValue(undefined),
     ...overrides,
@@ -96,6 +103,7 @@ describe('QueryOrchestrator', () => {
   let mockStore: any;
   const previousTliveHome = process.env.TLIVE_HOME;
   let tliveHome = '';
+  let mediaTempDir = '';
 
   beforeEach(() => {
     mockStore = {
@@ -113,6 +121,10 @@ describe('QueryOrchestrator', () => {
       rmSync(tliveHome, { recursive: true, force: true });
       tliveHome = '';
     }
+    if (mediaTempDir) {
+      rmSync(mediaTempDir, { recursive: true, force: true });
+      mediaTempDir = '';
+    }
     if (previousTliveHome === undefined) {
       delete process.env.TLIVE_HOME;
     } else {
@@ -128,6 +140,7 @@ describe('QueryOrchestrator', () => {
     adapter?: BaseChannelAdapter;
     state?: SessionStateManager;
     onConversationMessageResolved?: any;
+    defaultWorkdir?: string;
   } = {}) {
     const engine = options.engine ?? { processMessage: vi.fn().mockResolvedValue({ text: '' }) };
     const router = options.router ?? {
@@ -146,7 +159,7 @@ describe('QueryOrchestrator', () => {
       permissions,
       sdkEngine,
       store: mockStore,
-      defaultWorkdir: '/tmp/project',
+      defaultWorkdir: options.defaultWorkdir ?? '/tmp/project',
       defaultAgentSettingSources: ['user', 'project', 'local'],
       onConversationMessageResolved: options.onConversationMessageResolved,
     });
@@ -322,7 +335,7 @@ describe('QueryOrchestrator', () => {
     });
   });
 
-  it('keeps a stable file delivery route token across turns in a live session', async () => {
+  it('injects the fixed MEDIA instructions only on the first turn of a session', async () => {
     const scopeId = 'chat-1#thread:thread-1';
     const topicBinding = { ...defaultBinding, chatId: scopeId };
     const router = {
@@ -342,7 +355,6 @@ describe('QueryOrchestrator', () => {
       stream: new ReadableStream({ start: controller => controller.close() }),
     });
     const sdkEngine = createSdkEngine({
-      registerFileDeliveryRoute: vi.fn().mockReturnValue('route-token'),
       getOrCreateSession: vi.fn().mockReturnValue({
         runtimeInfo: { provider: 'codex', displayName: 'Remote Codex' },
         startTurn,
@@ -364,27 +376,73 @@ describe('QueryOrchestrator', () => {
       text: 'send another file back',
     });
 
-    expect(sdkEngine.registerFileDeliveryRoute).toHaveBeenCalledTimes(2);
-    expect(sdkEngine.registerFileDeliveryRoute).toHaveBeenCalledWith(
-      expect.any(String),
-      {
-        channelType: 'feishu',
-        chatId: 'chat-1',
-        scopeId,
-        threadId: 'thread-1',
-        replyToMessageId: 'msg-topic-1',
-        replyInThread: true,
-      },
-      '/tmp/project',
-    );
-    expect(startTurn.mock.calls[0][0]).toContain('Current routeToken: route-token');
-    expect(startTurn.mock.calls[0][0]).toContain('tlive_send_image');
-    expect(startTurn.mock.calls[0][0]).toContain('Do not answer only with a local filesystem path');
+    expect(startTurn.mock.calls[0][0]).toContain('MEDIA:<path>');
+    expect(startTurn.mock.calls[0][0]).toContain('Use one MEDIA line per file');
+    expect(startTurn.mock.calls[0][0]).toContain('instead of an MCP tool');
+    expect(startTurn.mock.calls[0][0]).not.toContain('/tmp/project');
+    expect(startTurn.mock.calls[0][0]).not.toContain('route-token');
     expect(startTurn.mock.calls[0][0]).toContain('generate an image and send it back');
-    expect(startTurn.mock.calls[1][0]).toContain('Current routeToken: route-token');
-    expect(engine.processMessage.mock.calls[1][0].text).toContain(
-      'Current routeToken: route-token',
-    );
+    expect(startTurn.mock.calls[1][0]).toBe('send another file back');
+    expect(engine.processMessage.mock.calls[1][0].text).toBe('send another file back');
+  });
+
+  it('sends local files referenced by streamed MEDIA lines and hides the directives', async () => {
+    mediaTempDir = mkdtempSync(join(tmpdir(), 'tlive-media-'));
+    writeFileSync(join(mediaTempDir, 'chart.png'), Buffer.from('png body'));
+    const engine = {
+      processMessage: vi.fn().mockImplementation(async (params) => {
+        params.onTextDelta?.('Chart ready.\nMED');
+        params.onTextDelta?.('IA:chart.png\nYou can view it below.');
+        await params.onQueryResult?.({
+          sessionId: 'sdk-media',
+          isError: false,
+          usage: { inputTokens: 1, outputTokens: 1, costUsd: 0 },
+        });
+      }),
+    };
+    const { adapter, orchestrator } = createHarness({
+      engine,
+      defaultWorkdir: mediaTempDir,
+    });
+
+    await orchestrator.run(adapter, inbound({ text: 'make a chart' }));
+
+    const sentMessages = (adapter.send as any).mock.calls.map((call: any[]) => call[0]);
+    const mediaMessage = sentMessages.find((message: any) => message.media);
+    const renderedText = JSON.stringify(sentMessages.filter((message: any) => !message.media));
+    expect(mediaMessage).toMatchObject({
+      chatId: 'chat-1',
+      media: {
+        type: 'image',
+        filename: 'chart.png',
+        mimeType: 'image/png',
+      },
+    });
+    expect(mediaMessage.media.buffer.toString()).toBe('png body');
+    expect(renderedText).toContain('Chart ready.');
+    expect(renderedText).toContain('You can view it below.');
+    expect(renderedText).not.toContain('MEDIA:chart.png');
+  });
+
+  it('renders a warning when a MEDIA path cannot be sent', async () => {
+    const engine = {
+      processMessage: vi.fn().mockImplementation(async (params) => {
+        params.onTextDelta?.('MEDIA:missing.png');
+        await params.onQueryResult?.({
+          sessionId: 'sdk-media',
+          isError: false,
+          usage: { inputTokens: 1, outputTokens: 1, costUsd: 0 },
+        });
+      }),
+    };
+    const { adapter, orchestrator } = createHarness({ engine });
+
+    await orchestrator.run(adapter, inbound({ text: 'send it' }));
+
+    const sentMessages = (adapter.send as any).mock.calls.map((call: any[]) => call[0]);
+    expect(sentMessages.some((message: any) => message.media)).toBe(false);
+    expect(JSON.stringify(sentMessages)).toContain('MEDIA send failed');
+    expect(JSON.stringify(sentMessages)).toContain('File not found');
   });
 
   it('auto-starts a Feishu topic for main-chat queries', async () => {

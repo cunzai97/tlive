@@ -149,6 +149,11 @@ export class SDKEngine {
     return this.sessions.getSessionContext(sessionKey);
   }
 
+  /** Return a prompt fragment only once for the lifetime of a logical session. */
+  takeInitialPrompt(sessionKey: string, promptKey: string, prompt: string): string | undefined {
+    return this.sessions.takeInitialPrompt(sessionKey, promptKey, prompt);
+  }
+
   updateSessionSdkSessionId(sessionKey: string, sdkSessionId?: string): void {
     this.sessions.updateSessionSdkSessionId(sessionKey, sdkSessionId);
   }
@@ -218,9 +223,9 @@ export class SDKEngine {
         bindingSessionId: binding.sessionId,
         workdir,
         sdkSessionId: binding.sdkSessionId,
-          provider: binding.provider,
-          clientId: binding.clientId,
-          source: 'current',
+        provider: binding.provider,
+        clientId: binding.clientId,
+        source: 'current',
       },
     };
   }

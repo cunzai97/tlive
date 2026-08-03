@@ -240,6 +240,18 @@ describe('SDKEngine', () => {
   });
 
   describe('getOrCreateSession', () => {
+    it('returns a one-time prompt only once per logical session', () => {
+      engine.registerSessionContext('feishu', 'chat-1', DEFAULT_SESSION_ID, '/workdir');
+
+      expect(engine.takeInitialPrompt(DEFAULT_SESSION_KEY, 'media', 'first prompt')).toBe(
+        'first prompt',
+      );
+      expect(engine.takeInitialPrompt(DEFAULT_SESSION_KEY, 'media', 'changed prompt')).toBeUndefined();
+
+      engine.resetSessionRuntime(DEFAULT_SESSION_KEY, 'expire');
+      expect(engine.takeInitialPrompt(DEFAULT_SESSION_KEY, 'media', 'changed prompt')).toBeUndefined();
+    });
+
     it('creates new session when none exists', () => {
       const mockSession = createMockSession();
       const mockProvider = createMockProvider({ '/workdir': mockSession });

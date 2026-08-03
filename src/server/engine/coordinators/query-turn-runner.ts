@@ -14,8 +14,11 @@ import { SessionStaleError, isStaleSessionError } from '../state/session-stale-e
 import type { SDKEngine } from '../sdk/engine.js';
 import type { QueryContext } from './query-context.js';
 import { CostTracker } from '../cost-tracker.js';
+import { MediaDirectiveParser } from '../messages/media-directive-parser.js';
+import { deliverLocalFile } from '../../services/file-delivery.js';
 
 const DEBUG_EVENTS = process.env.TL_DEBUG_EVENTS === '1';
+const FILE_DELIVERY_PROMPT_KEY = 'file-delivery-v2';
 
 export type QueryTurnOutcome = 'completed' | 'failed';
 
@@ -27,6 +30,7 @@ export interface QueryTurnRunnerOptions {
   store: BridgeStore;
   defaultWorkdir: string;
   defaultAgentSettingSources: AgentSettingSource[];
+  maxFileDeliveryBytes?: number;
   appendSystemPrompt?: string;
   onSdkSessionId?: (query: QueryContext, sdkSessionId: string) => void | Promise<void>;
 }
@@ -62,7 +66,36 @@ export class QueryTurnRunner {
     // Don't prepend file delivery context for slash commands - let the agent handle them
     const promptText = basePromptText.startsWith('/')
       ? basePromptText
-      : this.withFileDeliveryContext(basePromptText, msg, sessionKey, workdir);
+      : this.withFileDeliveryContext(basePromptText, sessionKey);
+    const mediaParser = new MediaDirectiveParser();
+    let mediaDelivered = false;
+
+    const flushMediaParser = (): void => {
+      const tail = mediaParser.finish();
+      if (tail) renderer.onTextDelta(tail);
+    };
+
+    const deliverMedia = async (): Promise<void> => {
+      flushMediaParser();
+      if (mediaDelivered) return;
+      mediaDelivered = true;
+
+      const route = deliveryRouteFromInbound(msg);
+      for (const filePath of mediaParser.getPaths()) {
+        const result = await deliverLocalFile({
+          adapter: query.adapter,
+          route,
+          workdir,
+          filePath,
+          maxFileSizeBytes: this.options.maxFileDeliveryBytes,
+        });
+        if (!result.success) {
+          renderer.onTextDelta(
+            `\n\n⚠️ MEDIA send failed for \`${filePath}\`: ${result.error || 'Unknown error'}`,
+          );
+        }
+      }
+    };
 
     let streamResult: StreamChatResult | undefined;
     let terminalEventSeen = false;
@@ -134,7 +167,10 @@ export class QueryTurnRunner {
           }
           await this.options.onSdkSessionId?.(query, id);
         },
-        onTextDelta: (delta) => renderer.onTextDelta(delta),
+        onTextDelta: (delta) => {
+          const visible = mediaParser.push(delta);
+          if (visible) renderer.onTextDelta(visible);
+        },
         onThinkingDelta: (delta) => renderer.onThinkingDelta(delta),
         onToolStart: (event) => renderer.onToolStart(event.name, event.input, event.id),
         onToolResult: (event) => {
@@ -209,6 +245,7 @@ export class QueryTurnRunner {
               `[bridge] final timeline: thinking=${state.thinkingEntries} text=${state.textEntries} tool=${state.toolEntries}`,
             );
           }
+          await deliverMedia();
           await renderer.onComplete();
         },
         onPromptSuggestion: (suggestion) => {
@@ -223,6 +260,7 @@ export class QueryTurnRunner {
           if (queryFailed) return;
           queryFailed = true;
           console.error(`[query] ${ctx.requestId} ERROR ${err.slice(0, 200)}`);
+          flushMediaParser();
           if (DEBUG_EVENTS) {
             const state = renderer.getDebugSnapshot();
             console.log(
@@ -240,6 +278,7 @@ export class QueryTurnRunner {
       queryFailed = true;
       const err = `${provider.displayName} stream ended without a result event`;
       console.error(`[query] ${ctx.requestId} ERROR ${err}`);
+      flushMediaParser();
       await renderer.onError(err);
     }
 
@@ -268,29 +307,23 @@ export class QueryTurnRunner {
       .catch(() => {});
   }
 
-  private withFileDeliveryContext(
-    promptText: string,
-    msg: InboundMessage,
-    sessionKey: string,
-    workdir: string,
-  ): string {
-    const routeToken = this.options.sdkEngine.registerFileDeliveryRoute(
+  private withFileDeliveryContext(promptText: string, sessionKey: string): string {
+    const initialPrompt = this.options.sdkEngine.takeInitialPrompt(
       sessionKey,
-      deliveryRouteFromInbound(msg),
-      workdir,
+      FILE_DELIVERY_PROMPT_KEY,
+      fileDeliveryPrompt(),
     );
-    return [fileDeliveryPrompt(routeToken), promptText].join('\n\n');
+    return initialPrompt ? [initialPrompt, promptText].join('\n\n') : promptText;
   }
 }
 
-function fileDeliveryPrompt(routeToken: string): string {
+function fileDeliveryPrompt(): string {
   return [
     '<tlive_file_delivery>',
-    `Current routeToken: ${routeToken}`,
-    'If the user asks you to send, return, upload, or deliver a file/image to this chat, call the TLive MCP tool tlive_send_file or tlive_send_image and include this routeToken.',
-    'This routeToken is stable for this conversation and persists across turns.',
-    'For files generated on this execution client, read the file and send it through the MCP file object: { fileName, mimeType, base64 }. Do not answer only with a local filesystem path.',
-    'Use the MCP url input only for HTTP(S) URLs reachable from the TLive MCP server process.',
+    'To send a local file or image to this chat, output a standalone line in the exact format MEDIA:<path>.',
+    'The path may be absolute or relative to the session working directory. Use one MEDIA line per file.',
+    'Do not wrap MEDIA lines in Markdown, code fences, bullets, or quotes. TLive removes each MEDIA line from the visible reply and sends the referenced file separately.',
+    'Use MEDIA instead of an MCP tool when returning local files.',
     '</tlive_file_delivery>',
   ].join('\n');
 }
