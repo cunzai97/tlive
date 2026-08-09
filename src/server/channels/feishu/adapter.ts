@@ -293,10 +293,11 @@ export class FeishuAdapter extends BaseChannelAdapter<FeishuRenderedMessage> {
   /** Classify Feishu/Lark SDK errors */
   classifyError(err: unknown): BridgeError {
     const e = err as Record<string, any>;
-    const message = e?.message ?? String(err);
+    const responseData = e?.response?.data as Record<string, any> | undefined;
+    const message = responseData?.msg ?? e?.msg ?? e?.message ?? String(err);
 
     // Feishu uses numeric error codes
-    const code = e?.code;
+    const code = responseData?.code ?? e?.data?.code ?? e?.code;
     const statusCode =
       e?.statusCode ??
       e?.status ??
@@ -307,8 +308,14 @@ export class FeishuAdapter extends BaseChannelAdapter<FeishuRenderedMessage> {
       return new RateLimitError(message, readRetryAfterMs(e));
     }
     if (code === 99991401 || code === 99991403) return new AuthError(message);
-    if (code === 230099) {
-      console.warn(`[feishu] FormatError (230099): message may be too large or contain too many tables. ${message}`);
+    if (
+      code === 230099 ||
+      code === 11310 ||
+      /ErrCode:\s*11310|card table number over limit/i.test(message)
+    ) {
+      console.warn(
+        `[feishu] FormatError (${code ?? '11310'}): message may be too large or contain too many tables. ${message}`,
+      );
       return new FormatError(message); // card table number over limit or content too large
     }
     if (statusCode) return new PlatformError(message, statusCode);

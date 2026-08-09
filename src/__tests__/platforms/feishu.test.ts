@@ -66,7 +66,35 @@ vi.mock('@larksuiteoapi/node-sdk', () => {
 });
 
 import { FeishuAdapter } from '../../server/channels/feishu/adapter.js';
-import { RateLimitError } from '../../server/channels/errors.js';
+import { FormatError, RateLimitError } from '../../server/channels/errors.js';
+
+function markdownTable(prefix: string, rows: number): string {
+  return [
+    '| Name | Value |',
+    '|---|---|',
+    ...Array.from({ length: rows }, (_, i) => `| ${prefix}${i + 1} | ${i + 1} |`),
+  ].join('\n');
+}
+
+function markdownContents(value: unknown): string[] {
+  if (!value || typeof value !== 'object') return [];
+  const object = value as Record<string, unknown>;
+  const own = typeof object.content === 'string' && object.tag === 'markdown' ? [object.content] : [];
+  const elements = Array.isArray(object.elements) ? object.elements.flatMap(markdownContents) : [];
+  const body = object.body && typeof object.body === 'object'
+    ? markdownContents(object.body)
+    : [];
+  return [...own, ...elements, ...body];
+}
+
+function tableCountInCard(content: string): number {
+  const card = JSON.parse(content);
+  return markdownContents(card).reduce(
+    (total, markdown) =>
+      total + [...markdown.matchAll(/^(\|.*\|)\n(\|[-:| ]+\|)\n((?:\|.*\|\n?)+)/gm)].length,
+    0,
+  );
+}
 
 describe('FeishuAdapter', () => {
   let adapter: FeishuAdapter;
@@ -126,6 +154,22 @@ describe('FeishuAdapter', () => {
       expect(err).toBeInstanceOf(RateLimitError);
       expect((err as RateLimitError).retryAfterMs).toBe(3000);
     });
+
+    it('recognizes nested Feishu table-limit responses as format errors', () => {
+      const err = adapter.classifyError({
+        message: 'Request failed with status code 400',
+        response: {
+          status: 400,
+          data: {
+            code: 230099,
+            msg: 'Failed to create card content, ext=ErrCode: 11310; ErrMsg: card table number over limit;',
+          },
+        },
+      });
+
+      expect(err).toBeInstanceOf(FormatError);
+      expect(err.message).toContain('11310');
+    });
   });
 
   describe('isAuthorized()', () => {
@@ -171,6 +215,91 @@ describe('FeishuAdapter', () => {
       const call = mockMessageCreate.mock.calls[0][0];
       expect(call.params.receive_id_type).toBe('chat_id');
       expect(call.data.receive_id).toBe('oc_specific_chat');
+      await adapter.stop();
+    });
+
+    it('splits tables from the final structured element tree across safe cards', async () => {
+      const content = [
+        'Before',
+        markdownTable('Long', 25),
+        markdownTable('SmallA', 2),
+        markdownTable('SmallB', 2),
+        markdownTable('SmallC', 2),
+        'After',
+      ].join('\n\n');
+      await adapter.start();
+
+      const result = await adapter.send({
+        chatId: 'oc_chat123',
+        text: '',
+        feishuHeader: { template: 'green', title: 'Summary' },
+        feishuElements: [
+          {
+            tag: 'collapsible_panel',
+            expanded: true,
+            header: { title: { tag: 'plain_text', content: 'Details' } },
+            elements: [{ tag: 'markdown', content }],
+          },
+        ],
+      });
+
+      expect(result.success).toBe(true);
+      expect(mockMessageCreate).toHaveBeenCalledTimes(2);
+      const cardContents = mockMessageCreate.mock.calls.map((call) => call[0].data.content);
+      for (const cardContent of cardContents) {
+        expect(tableCountInCard(cardContent)).toBeLessThanOrEqual(5);
+      }
+      const delivered = cardContents
+        .flatMap((cardContent) => markdownContents(JSON.parse(cardContent)))
+        .join('\n');
+      for (let i = 1; i <= 25; i++) expect(delivered).toContain(`Long${i}`);
+      expect(delivered).toContain('SmallA1');
+      expect(delivered).toContain('SmallB1');
+      expect(delivered).toContain('SmallC1');
+      expect(delivered).toContain('Before');
+      expect(delivered).toContain('After');
+      await adapter.stop();
+    });
+
+    it('counts tables created by long-table normalization before splitting plain cards', async () => {
+      const content = [
+        markdownTable('Long', 25),
+        markdownTable('SmallA', 1),
+        markdownTable('SmallB', 1),
+        markdownTable('SmallC', 1),
+      ].join('\n\n');
+      await adapter.start();
+
+      await adapter.send({ chatId: 'oc_chat123', text: content });
+
+      expect(mockMessageCreate).toHaveBeenCalledTimes(2);
+      for (const call of mockMessageCreate.mock.calls) {
+        expect(tableCountInCard(call[0].data.content)).toBeLessThanOrEqual(5);
+      }
+      await adapter.stop();
+    });
+
+    it('splits a structured summary with nine ordinary tables without dropping content', async () => {
+      const content = Array.from({ length: 9 }, (_, i) =>
+        markdownTable(`Table${i + 1}Row`, 1),
+      ).join('\n\n');
+      await adapter.start();
+
+      await adapter.send({
+        chatId: 'oc_chat123',
+        text: '',
+        feishuElements: [{ tag: 'markdown', content }],
+      });
+
+      expect(mockMessageCreate).toHaveBeenCalledTimes(2);
+      const cardContents = mockMessageCreate.mock.calls.map((call) => call[0].data.content);
+      for (const cardContent of cardContents) {
+        expect(tableCountInCard(cardContent)).toBeLessThanOrEqual(5);
+      }
+      const delivered = cardContents
+        .flatMap((cardContent) => markdownContents(JSON.parse(cardContent)))
+        .join('\n');
+      for (let i = 1; i <= 9; i++) expect(delivered).toContain(`Table${i}Row1`);
       await adapter.stop();
     });
 

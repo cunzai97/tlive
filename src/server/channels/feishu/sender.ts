@@ -1,7 +1,14 @@
 import type { Client } from '@larksuiteoapi/node-sdk';
 import type { SendResult, ThreadStartResult } from '../types.js';
 import type { BridgeError } from '../errors.js';
-import { markdownToFeishu, downgradeHeadings, splitLargeTables, splitByTableCount } from './markdown.js';
+import {
+  markdownToFeishu,
+  downgradeHeadings,
+  splitLargeTables,
+  splitByTableCount,
+  countMarkdownTables,
+  MAX_TABLES_PER_CARD,
+} from './markdown.js';
 import { buildFeishuCard, buildFeishuButtonElements } from './card-builder.js';
 import type { FeishuCardElement } from './card-builder.js';
 import type { FeishuRenderedMessage } from './types.js';
@@ -57,8 +64,27 @@ export async function sendFeishuMessage(
     }
   }
 
-  // Step 1: split by table count (each chunk ≤ 5 tables) to avoid Feishu card table limit
-  const tableChunks = splitByTableCount(raw);
+  if (message.feishuElements) {
+    const elementChunks = splitStructuredCardElements(
+      message.feishuElements as FeishuCardElement[],
+    );
+    let firstMessageId = '';
+    for (let i = 0; i < elementChunks.length; i++) {
+      try {
+        const chunkMessage = { ...message, feishuElements: elementChunks[i] };
+        const cardContent = buildStructuredCardForMessage(chunkMessage);
+        const result = await sendMessageContent(client, chunkMessage, 'interactive', cardContent);
+        if (i === 0) firstMessageId = String(result?.data?.message_id ?? '');
+      } catch (err) {
+        throw classifyError(err);
+      }
+    }
+    return { messageId: firstMessageId, success: true };
+  }
+
+  // Split large tables before counting them: one source table may become several Feishu tables.
+  const normalized = splitLargeTables(raw);
+  const tableChunks = splitByTableCount(normalized);
 
   // Step 2: within each table chunk, apply paragraph-based chunking
   // 使用 FEISHU_CHUNK_LIMIT (20KB) 而非 25KB，为 JSON 包装预留空间
@@ -70,7 +96,7 @@ export async function sendFeishuMessage(
 
   if (allChunks.length === 1) {
     try {
-      const cardContent = buildCardForMessage(message, raw);
+      const cardContent = buildCardForMessage(message, allChunks[0]);
       const result = await sendMessageContent(client, message, 'interactive', cardContent);
       return { messageId: String(result?.data?.message_id ?? ''), success: true };
     } catch (err) {
@@ -110,8 +136,35 @@ export async function editFeishuMessage(
   if (!client) return;
   const text = message.text ? message.text : markdownToFeishu(message.html ?? '');
 
-  // Step 1: split by table count (each chunk ≤ 5 tables)
-  const tableChunks = splitByTableCount(text);
+  if (message.feishuElements) {
+    const elementChunks = splitStructuredCardElements(
+      message.feishuElements as FeishuCardElement[],
+    );
+    try {
+      const firstMessage = { ...message, feishuElements: elementChunks[0] };
+      await client.im.message.patch({
+        path: { message_id: messageId },
+        data: { content: buildStructuredCardForMessage(firstMessage) },
+      });
+      for (let i = 1; i < elementChunks.length; i++) {
+        const chunkMessage = { ...message, feishuElements: elementChunks[i] };
+        await sendMessageContent(
+          client,
+          chunkMessage,
+          'interactive',
+          buildStructuredCardForMessage(chunkMessage),
+        );
+      }
+    } catch (err: any) {
+      if (classifyError && isFeishuRateLimit(err)) throw classifyError(err);
+      console.warn(`[feishu] editMessage failed: ${err?.message ?? err}`);
+      throw classifyError ? classifyError(err) : err;
+    }
+    return;
+  }
+
+  const normalized = splitLargeTables(text);
+  const tableChunks = splitByTableCount(normalized);
 
   // Step 2: within each table chunk, apply paragraph-based chunking
   // 使用 FEISHU_CHUNK_LIMIT (20KB) 而非 25KB，为 JSON 包装预留空间
@@ -333,6 +386,83 @@ function buildStructuredCardForMessage(message: FeishuRenderedMessage): string {
       ...buildFeishuButtonElements(message.feishuButtons ?? message.buttons),
     ],
   });
+}
+
+function tableCountInElement(element: FeishuCardElement): number {
+  let count = typeof element.content === 'string' ? countMarkdownTables(element.content) : 0;
+  if (element.elements) {
+    count += element.elements.reduce((total, child) => total + tableCountInElement(child), 0);
+  }
+  if (element.body?.elements) {
+    count += element.body.elements.reduce(
+      (total, child) => total + tableCountInElement(child),
+      0,
+    );
+  }
+  return count;
+}
+
+function splitElementByTableCount(element: FeishuCardElement): FeishuCardElement[] {
+  if (typeof element.content === 'string') {
+    const normalized = splitLargeTables(element.content);
+    const contentChunks = splitByTableCount(normalized);
+    if (contentChunks.length > 1) {
+      return contentChunks.map((content) => ({ ...element, content }));
+    }
+    element = { ...element, content: normalized };
+  }
+
+  if (element.elements) {
+    const childChunks = splitStructuredCardElements(element.elements);
+    if (childChunks.length > 1) {
+      return childChunks.map((elements) => ({ ...element, elements }));
+    }
+    element = { ...element, elements: childChunks[0] };
+  }
+
+  if (element.body?.elements) {
+    const bodyChunks = splitStructuredCardElements(element.body.elements);
+    if (bodyChunks.length > 1) {
+      return bodyChunks.map((elements) => ({
+        ...element,
+        body: { ...element.body, elements },
+      }));
+    }
+    element = {
+      ...element,
+      body: { ...element.body, elements: bodyChunks[0] },
+    };
+  }
+
+  return [element];
+}
+
+/** Split the final Card 2.0 element tree, including tables nested in panels. */
+function splitStructuredCardElements(elements: FeishuCardElement[]): FeishuCardElement[][] {
+  const expanded = elements.flatMap(splitElementByTableCount);
+  if (expanded.length === 0) return [[]];
+
+  const chunks: FeishuCardElement[][] = [];
+  let current: FeishuCardElement[] = [];
+  let currentTables = 0;
+
+  for (const element of expanded) {
+    const elementTables = tableCountInElement(element);
+    if (
+      current.length > 0 &&
+      elementTables > 0 &&
+      currentTables + elementTables > MAX_TABLES_PER_CARD
+    ) {
+      chunks.push(current);
+      current = [];
+      currentTables = 0;
+    }
+    current.push(element);
+    currentTables += elementTables;
+  }
+
+  if (current.length > 0) chunks.push(current);
+  return chunks;
 }
 
 function buildPlainCard(

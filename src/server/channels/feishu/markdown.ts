@@ -62,10 +62,15 @@ export function downgradeHeadings(text: string): string {
 const MAX_TABLE_ROWS = 10;
 
 /** Maximum number of tables in a Feishu card (platform hard limit) */
-const MAX_TABLES_PER_CARD = 5;
+export const MAX_TABLES_PER_CARD = 5;
 
 /** Match a markdown table: header + separator + data rows */
-const TABLE_REGEX = /^(\|.*\|)\n(\|[-:| ]+\|)\n((?:\|.*\|\n?)+)/gm;
+const TABLE_REGEX = /^(\|.*\|)\n(\|[-:| ]+\|)\n((?:\|.*\|(?:\n(?=\|)|$))+)/gm;
+
+/** Count the tables Feishu will materialize from a markdown string. */
+export function countMarkdownTables(text: string): number {
+  return [...text.matchAll(new RegExp(TABLE_REGEX))].length;
+}
 
 /**
  * Split large markdown tables into multiple smaller tables.
