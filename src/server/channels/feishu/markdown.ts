@@ -61,15 +61,22 @@ export function downgradeHeadings(text: string): string {
 /** Maximum rows per table in Feishu card (platform limit ~10) */
 const MAX_TABLE_ROWS = 10;
 
-/** Maximum number of tables in a Feishu card (platform hard limit) */
-export const MAX_TABLES_PER_CARD = 5;
+/**
+ * Safe table budget for a streaming Feishu card.
+ * Card 2.0 may recognize one additional table while markdown is incomplete,
+ * so stay below the observed five-table failure boundary.
+ */
+export const MAX_TABLES_PER_CARD = 4;
 
 /** Match a markdown table: header + separator + data rows */
 const TABLE_REGEX = /^(\|.*\|)\n(\|[-:| ]+\|)\n((?:\|.*\|(?:\n(?=\|)|$))+)/gm;
 
+/** Match a table as soon as its header and separator arrive during streaming. */
+const TABLE_START_REGEX = /^(\|.*\|)\n(\|[-:| ]+\|)(?=\n|$)/gm;
+
 /** Count the tables Feishu will materialize from a markdown string. */
 export function countMarkdownTables(text: string): number {
-  return [...text.matchAll(new RegExp(TABLE_REGEX))].length;
+  return [...text.matchAll(new RegExp(TABLE_START_REGEX))].length;
 }
 
 /**
@@ -118,7 +125,7 @@ export function splitLargeTables(text: string, _locale: Locale = 'zh'): string {
  */
 export function splitByTableCount(text: string): string[] {
   const tablePositions: number[] = [];
-  const regex = new RegExp(TABLE_REGEX);
+  const regex = new RegExp(TABLE_START_REGEX);
 
   let match: RegExpExecArray | null = regex.exec(text);
   while (match !== null) {

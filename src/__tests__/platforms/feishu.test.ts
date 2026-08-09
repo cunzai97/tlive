@@ -70,6 +70,7 @@ vi.mock('@larksuiteoapi/node-sdk', () => {
 import { FeishuAdapter } from '../../server/channels/feishu/adapter.js';
 import { FormatError, RateLimitError } from '../../server/channels/errors.js';
 import { FeishuFormatter } from '../../server/channels/feishu/formatter.js';
+import { MAX_TABLES_PER_CARD } from '../../server/channels/feishu/markdown.js';
 
 function markdownTable(prefix: string, rows: number): string {
   return [
@@ -251,7 +252,7 @@ describe('FeishuAdapter', () => {
       expect(mockMessageCreate).toHaveBeenCalledTimes(2);
       const cardContents = mockMessageCreate.mock.calls.map((call) => call[0].data.content);
       for (const cardContent of cardContents) {
-        expect(tableCountInCard(cardContent)).toBeLessThanOrEqual(5);
+        expect(tableCountInCard(cardContent)).toBeLessThanOrEqual(MAX_TABLES_PER_CARD);
       }
       const delivered = cardContents
         .flatMap((cardContent) => markdownContents(JSON.parse(cardContent)))
@@ -278,8 +279,40 @@ describe('FeishuAdapter', () => {
 
       expect(mockMessageCreate).toHaveBeenCalledTimes(2);
       for (const call of mockMessageCreate.mock.calls) {
-        expect(tableCountInCard(call[0].data.content)).toBeLessThanOrEqual(5);
+        expect(tableCountInCard(call[0].data.content)).toBeLessThanOrEqual(MAX_TABLES_PER_CARD);
       }
+      await adapter.stop();
+    });
+
+    it('splits five ordinary tables before reaching the streaming parser boundary', async () => {
+      const content = Array.from({ length: 5 }, (_, i) =>
+        markdownTable(`Boundary${i + 1}Row`, 1),
+      ).join('\n\n');
+      await adapter.start();
+
+      await adapter.send({ chatId: 'oc_chat123', text: content });
+
+      expect(mockMessageCreate).toHaveBeenCalledTimes(2);
+      expect(
+        mockMessageCreate.mock.calls.map((call) => tableCountInCard(call[0].data.content)),
+      ).toEqual([MAX_TABLES_PER_CARD, 1]);
+      await adapter.stop();
+    });
+
+    it('splits before a fifth streaming table receives its first data row', async () => {
+      const partialTable = '| Name | Value |\n|---|---|';
+      const content = [
+        ...Array.from({ length: 4 }, (_, i) => markdownTable(`Complete${i + 1}Row`, 1)),
+        partialTable,
+      ].join('\n\n');
+      await adapter.start();
+
+      await adapter.send({ chatId: 'oc_chat123', text: content });
+
+      expect(mockMessageCreate).toHaveBeenCalledTimes(2);
+      const cardContents = mockMessageCreate.mock.calls.map((call) => call[0].data.content);
+      expect(tableCountInCard(cardContents[0])).toBe(MAX_TABLES_PER_CARD);
+      expect(markdownContents(JSON.parse(cardContents[1])).join('\n')).toContain(partialTable);
       await adapter.stop();
     });
 
@@ -289,7 +322,8 @@ describe('FeishuAdapter', () => {
       ).join('\n\n');
       mockMessageCreate
         .mockResolvedValueOnce({ data: { message_id: 'summary-root' } })
-        .mockResolvedValueOnce({ data: { message_id: 'summary-overflow' } });
+        .mockResolvedValueOnce({ data: { message_id: 'summary-overflow-1' } })
+        .mockResolvedValueOnce({ data: { message_id: 'summary-overflow-2' } });
       await adapter.start();
 
       const message = {
@@ -299,10 +333,10 @@ describe('FeishuAdapter', () => {
       };
       const result = await adapter.send(message);
 
-      expect(mockMessageCreate).toHaveBeenCalledTimes(2);
+      expect(mockMessageCreate).toHaveBeenCalledTimes(3);
       const cardContents = mockMessageCreate.mock.calls.map((call) => call[0].data.content);
       for (const cardContent of cardContents) {
-        expect(tableCountInCard(cardContent)).toBeLessThanOrEqual(5);
+        expect(tableCountInCard(cardContent)).toBeLessThanOrEqual(MAX_TABLES_PER_CARD);
       }
       const delivered = cardContents
         .flatMap((cardContent) => markdownContents(JSON.parse(cardContent)))
@@ -311,13 +345,17 @@ describe('FeishuAdapter', () => {
 
       await adapter.editMessage('oc_chat123', result.messageId, message);
 
-      expect(mockMessageCreate).toHaveBeenCalledTimes(2);
+      expect(mockMessageCreate).toHaveBeenCalledTimes(3);
       expect(mockMessagePatch).toHaveBeenCalledWith({
         path: { message_id: 'summary-root' },
         data: { content: expect.any(String) },
       });
       expect(mockMessagePatch).toHaveBeenCalledWith({
-        path: { message_id: 'summary-overflow' },
+        path: { message_id: 'summary-overflow-1' },
+        data: { content: expect.any(String) },
+      });
+      expect(mockMessagePatch).toHaveBeenCalledWith({
+        path: { message_id: 'summary-overflow-2' },
         data: { content: expect.any(String) },
       });
       await adapter.stop();
@@ -578,6 +616,67 @@ describe('FeishuAdapter', () => {
   });
 
   describe('editMessage()', () => {
+    it('reuses table overflow bubbles while a streamed table set grows and shrinks', async () => {
+      const remoteCards = new Map<string, string>();
+      mockMessageCreate.mockImplementation(async (call) => {
+        remoteCards.set('table-overflow', call.data.content);
+        return { data: { message_id: 'table-overflow' } };
+      });
+      mockMessagePatch.mockImplementation(async (call) => {
+        remoteCards.set(call.path.message_id, call.data.content);
+        return {};
+      });
+      mockMessageDelete.mockImplementation(async (call) => {
+        remoteCards.delete(call.path.message_id);
+        return {};
+      });
+      const tableMessage = (count: number) => ({
+        chatId: 'oc_chat123',
+        text: Array.from({ length: count }, (_, i) =>
+          markdownTable(`Growing${i + 1}Row`, 1),
+        ).join('\n\n'),
+      });
+      await adapter.start();
+
+      await adapter.editMessage('oc_chat123', 'table-root', tableMessage(4));
+      expect(mockMessageCreate).not.toHaveBeenCalled();
+
+      const partialFifthTable = {
+        chatId: 'oc_chat123',
+        text: `${tableMessage(4).text}\n\n| Name | Value |\n|---|---|`,
+      };
+      await adapter.editMessage('oc_chat123', 'table-root', partialFifthTable);
+      expect(mockMessageCreate).toHaveBeenCalledTimes(1);
+
+      await adapter.editMessage('oc_chat123', 'table-root', tableMessage(5));
+      expect(mockMessageCreate).toHaveBeenCalledTimes(1);
+      expect(mockMessagePatch).toHaveBeenCalledWith({
+        path: { message_id: 'table-overflow' },
+        data: { content: expect.any(String) },
+      });
+      expect([...remoteCards.values()].map(tableCountInCard)).toEqual([
+        MAX_TABLES_PER_CARD,
+        1,
+      ]);
+      const delivered = [...remoteCards.values()]
+        .flatMap((cardContent) => markdownContents(JSON.parse(cardContent)))
+        .join('\n');
+      for (let i = 1; i <= 5; i++) {
+        expect(delivered.match(new RegExp(`Growing${i}Row1`, 'g'))).toHaveLength(1);
+      }
+
+      await adapter.editMessage('oc_chat123', 'table-root', tableMessage(5));
+      expect(mockMessageCreate).toHaveBeenCalledTimes(1);
+
+      await adapter.editMessage('oc_chat123', 'table-root', tableMessage(4));
+      expect(mockMessageDelete).toHaveBeenCalledWith({
+        path: { message_id: 'table-overflow' },
+      });
+      expect(remoteCards.has('table-overflow')).toBe(false);
+      expect(tableCountInCard(remoteCards.get('table-root')!)).toBe(MAX_TABLES_PER_CARD);
+      await adapter.stop();
+    });
+
     it('uses one stable physical split set when text and table limits trigger together', async () => {
       const remoteCards = new Map<string, string>();
       let nextMessageId = 1;
@@ -632,7 +731,7 @@ describe('FeishuAdapter', () => {
 
       expect(mockMessageCreate).toHaveBeenCalledTimes(createdAfterInitialSend);
       for (const cardContent of remoteCards.values()) {
-        expect(tableCountInCard(cardContent)).toBeLessThanOrEqual(5);
+        expect(tableCountInCard(cardContent)).toBeLessThanOrEqual(MAX_TABLES_PER_CARD);
         expect(Buffer.byteLength(cardContent, 'utf8')).toBeLessThan(24 * 1024);
       }
       const delivered = [...remoteCards.values()]

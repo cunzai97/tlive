@@ -84,4 +84,34 @@ describe('QueryPresentationFactory', () => {
     expect(adapter.send).toHaveBeenCalledWith(expect.objectContaining({ chatId: 'chat-1' }));
     expect(onMessageId).toHaveBeenCalledWith('out-1');
   });
+
+  it('leaves oversized streamed text in one logical bubble for FeishuSender', async () => {
+    vi.useFakeTimers();
+    const adapter = createAdapter();
+    const factory = new QueryPresentationFactory({ defaultWorkdir: '/work' });
+    const { renderer } = factory.createTurn({
+      adapter,
+      msg: createMessage(),
+      binding: { cwd: '/work', sdkSessionId: 'sdk-1' },
+      sessionKey: 'feishu:chat-1:binding-1',
+      reactions: {
+        processing: 'Typing',
+        done: 'OK',
+        error: 'FACEPALM',
+        stalled: 'OneSecond',
+        permission: 'Pin',
+      },
+      typing: { stop: vi.fn() },
+      onMessageId: vi.fn(),
+    } as any);
+
+    renderer.onTextDelta('a'.repeat(15_000));
+    await vi.advanceTimersByTimeAsync(0);
+    renderer.onTextDelta('b'.repeat(15_000));
+    await vi.advanceTimersByTimeAsync(4_000);
+
+    expect(adapter.send).toHaveBeenCalledTimes(1);
+    expect(adapter.editMessage).toHaveBeenCalled();
+    renderer.dispose();
+  });
 });
