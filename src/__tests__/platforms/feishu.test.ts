@@ -69,6 +69,7 @@ vi.mock('@larksuiteoapi/node-sdk', () => {
 
 import { FeishuAdapter } from '../../server/channels/feishu/adapter.js';
 import { FormatError, RateLimitError } from '../../server/channels/errors.js';
+import { FeishuFormatter } from '../../server/channels/feishu/formatter.js';
 
 function markdownTable(prefix: string, rows: number): string {
   return [
@@ -577,6 +578,74 @@ describe('FeishuAdapter', () => {
   });
 
   describe('editMessage()', () => {
+    it('uses one stable physical split set when text and table limits trigger together', async () => {
+      const remoteCards = new Map<string, string>();
+      let nextMessageId = 1;
+      mockMessageCreate.mockImplementation(async (call) => {
+        const messageId = `combined-${nextMessageId++}`;
+        remoteCards.set(messageId, call.data.content);
+        return { data: { message_id: messageId } };
+      });
+      mockMessagePatch.mockImplementation(async (call) => {
+        remoteCards.set(call.path.message_id, call.data.content);
+        return {};
+      });
+      mockMessageDelete.mockImplementation(async (call) => {
+        remoteCards.delete(call.path.message_id);
+        return {};
+      });
+      const stressText = [
+        'COMBINED_START',
+        '长文本内容'.repeat(5000),
+        ...Array.from({ length: 9 }, (_, i) => markdownTable(`Combined${i + 1}Row`, 1)),
+        'COMBINED_END',
+      ].join('\n\n');
+      const formatter = new FeishuFormatter('zh');
+      const executing = formatter.formatProgress('oc_chat123', {
+        phase: 'executing',
+        taskSummary: 'combined split stress test',
+        elapsedSeconds: 10,
+        renderedText: stressText,
+        totalTools: 0,
+        todoItems: [],
+        timeline: [{ kind: 'text', text: stressText }],
+      });
+      await adapter.start();
+
+      const result = await adapter.send(executing);
+      const createdAfterInitialSend = mockMessageCreate.mock.calls.length;
+      expect(createdAfterInitialSend).toBeGreaterThan(1);
+
+      await adapter.editMessage('oc_chat123', result.messageId, executing);
+      expect(mockMessageCreate).toHaveBeenCalledTimes(createdAfterInitialSend);
+
+      const completed = formatter.formatProgress('oc_chat123', {
+        phase: 'completed',
+        taskSummary: 'combined split stress test',
+        elapsedSeconds: 20,
+        renderedText: stressText,
+        totalTools: 0,
+        todoItems: [],
+        timeline: [{ kind: 'text', text: stressText }],
+      });
+      await adapter.editMessage('oc_chat123', result.messageId, completed);
+
+      expect(mockMessageCreate).toHaveBeenCalledTimes(createdAfterInitialSend);
+      for (const cardContent of remoteCards.values()) {
+        expect(tableCountInCard(cardContent)).toBeLessThanOrEqual(5);
+        expect(Buffer.byteLength(cardContent, 'utf8')).toBeLessThan(24 * 1024);
+      }
+      const delivered = [...remoteCards.values()]
+        .flatMap((cardContent) => markdownContents(JSON.parse(cardContent)))
+        .join('\n');
+      expect(delivered.match(/COMBINED_START/g)).toHaveLength(1);
+      expect(delivered.match(/COMBINED_END/g)).toHaveLength(1);
+      for (let i = 1; i <= 9; i++) {
+        expect(delivered.match(new RegExp(`Combined${i}Row1`, 'g'))).toHaveLength(1);
+      }
+      await adapter.stop();
+    });
+
     it('updates existing overflow bubbles instead of recreating them on every stream flush', async () => {
       mockMessageCreate
         .mockResolvedValueOnce({ data: { message_id: 'overflow-1' } })

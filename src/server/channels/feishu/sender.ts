@@ -223,6 +223,7 @@ async function editFeishuMessageChunks(
   const states = overflowMessageMap(client);
   const existingIds = states.get(rootMessageId)?.messageIds ?? [];
   const nextIds: string[] = [];
+  let createdCount = 0;
 
   try {
     await client.im.message.patch({
@@ -243,7 +244,10 @@ async function editFeishuMessageChunks(
 
       const result = await sendMessageContent(client, message, 'interactive', cardContents[i]);
       const createdId = String(result?.data?.message_id ?? '');
-      if (createdId) nextIds.push(createdId);
+      if (createdId) {
+        nextIds.push(createdId);
+        createdCount++;
+      }
     }
 
     const staleIds = existingIds.slice(Math.max(0, cardContents.length - 1));
@@ -255,6 +259,11 @@ async function editFeishuMessageChunks(
       });
     }
     rememberOverflowMessages(client, rootMessageId, nextIds);
+    if (createdCount > 0 || staleIds.length > 0) {
+      console.log(
+        `[feishu] overflow topology root=${rootMessageId.slice(-8)} chunks=${cardContents.length} reused=${nextIds.length - createdCount} created=${createdCount} removed=${staleIds.length}`,
+      );
+    }
   } catch (err: any) {
     if (nextIds.length > 0) rememberOverflowMessages(client, rootMessageId, nextIds);
     if (classifyError && isFeishuRateLimit(err)) throw classifyError(err);

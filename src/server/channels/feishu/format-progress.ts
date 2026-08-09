@@ -254,20 +254,18 @@ export function buildProgressTimelineElements(params: FormatProgressParams): Fei
       if (budget <= 0 && picked.length > 0) break;
       const operation = visibleOperations[i];
       const isLatest = picked.length === 0;
-      const maxPerOperation = isLatest
-        ? isDone
-          ? 1800
-          : operation.toolEntries.length === 0
-            ? 5500
-            : 2800
-        : isDone
-          ? 1200
-          : 1800;
+      const maxPerOperation = isLatest ? (isDone ? 1800 : 2800) : isDone ? 1200 : 1800;
       const reservedBudget = isLatest && !isDone ? Math.max(budget, 1800) : budget;
-      const content = truncate(
-        downgradeHeadings(buildOperationContent(operation, true)),
-        Math.min(reservedBudget, maxPerOperation),
-      );
+      const operationContent = downgradeHeadings(buildOperationContent(operation, true));
+      const isStreamingTextOnly =
+        !isDone &&
+        isLatest &&
+        !operation.thinkingContent.trim() &&
+        operation.toolEntries.length === 0 &&
+        operation.textEntries.length > 0;
+      const content = isStreamingTextOnly
+        ? operationContent
+        : truncate(operationContent, Math.min(reservedBudget, maxPerOperation));
       picked.push({ operation, content });
       budget -= content.length;
     }
@@ -325,7 +323,7 @@ export function buildProgressContentElements(params: FormatProgressParams): Feis
     if (!data.completedTraceOnly) {
       const completedBody = extractCompletedBody(data);
       if (completedBody) {
-        elements.push(md(downgradeHeadings(truncate(splitLargeTables(completedBody), 25000))));
+        elements.push(md(downgradeHeadings(splitLargeTables(completedBody))));
       }
     }
   } else if (data.phase === 'waiting_permission' && data.permission) {

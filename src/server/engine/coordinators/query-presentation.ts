@@ -3,8 +3,7 @@ import type { InboundMessage } from '../../channels/types.js';
 import { FEISHU_MESSAGE_LIMIT } from '../../channels/limits.js';
 import { withInboundReplyContext } from '../../channels/reply-context.js';
 import { t } from '../../../shared/i18n/index.js';
-import { buildProgressData } from '../messages/progress-builder.js';
-import { MessageRenderer, type MessageRendererState } from '../messages/renderer.js';
+import { MessageRenderer } from '../messages/renderer.js';
 import { QueryExecutionPresenter } from '../../presentation/query-presenter.js';
 
 export interface QueryTypingHandle {
@@ -59,7 +58,6 @@ export class QueryPresentationFactory {
     });
 
     renderer = new MessageRenderer({
-      shouldSplitState: (state) => this.shouldSplitProgressBubble(adapter, msg, state),
       platformLimit: FEISHU_MESSAGE_LIMIT,
       throttleMs: 300,
       adaptiveFlush: {
@@ -120,17 +118,6 @@ export class QueryPresentationFactory {
     });
 
     return { renderer, presenter };
-  }
-
-  private shouldSplitProgressBubble(
-    adapter: BaseChannelAdapter,
-    inbound: InboundMessage,
-    state: MessageRendererState,
-  ): boolean {
-    const _locale = adapter.getLocale();
-    const progressData = buildProgressData(state, inbound.text || t('format.continueTask'));
-    const outMsg = adapter.format({ type: 'progress', chatId: inbound.chatId, data: progressData });
-    return adapter.shouldSplitProgressMessage(outMsg);
   }
 }
 
