@@ -156,7 +156,6 @@ export class PiLiveSession implements LiveSession {
       // Bind the ask bridge UIContext so Pi's `ask` tool routes through Feishu
       await session.bindExtensions({
         uiContext: createPiAskBridge(this._turnAskQuestionHandler, context.abortController.signal),
-        mode: 'print',
       });
 
       unsubscribe = session.subscribe((event) => {
