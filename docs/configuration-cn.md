@@ -58,6 +58,24 @@ TL_AGENT_SETTINGS=user,project,local
 - `full`：加载 user + project + local
 - `isolated`：当前 chat 不加载外部 settings
 
+Codex provider 选项：
+
+```env
+# ~/.tlive/client.env
+TL_CODEX_MODEL=
+TL_CODEX_PATH=
+TL_CODEX_SANDBOX_MODE=auto
+TL_CODEX_APPROVAL_POLICY=on-request
+TL_CODEX_SKIP_GIT_REPO_CHECK=false
+TL_CODEX_REASONING_EFFORT=
+TL_CODEX_NETWORK_ACCESS=
+TL_CODEX_WEB_SEARCH=
+```
+
+Linux 下，`auto` 会探测 Codex 的 `workspace-write` 沙箱。如果 bwrap/AppArmor 拒绝所需的
+namespace 初始化，TLive 会告警并降级到 `danger-full-access`；此时 Codex 文件系统沙箱会被
+关闭。若要禁止这种降级，请显式设置 `workspace-write`，并修复宿主机的沙箱策略。
+
 Pi provider 选项：
 
 ```env

@@ -11,6 +11,14 @@ const codexSdkMocks = vi.hoisted(() => ({
   startThread: vi.fn(),
 }));
 
+const childProcessMocks = vi.hoisted(() => ({
+  spawnSync: vi.fn(),
+}));
+
+vi.mock('node:child_process', () => ({
+  spawnSync: childProcessMocks.spawnSync,
+}));
+
 vi.mock('@openai/codex-sdk', () => ({
   Codex: class MockCodex {
     constructor(options?: unknown) {
@@ -28,7 +36,10 @@ vi.mock('@openai/codex-sdk', () => ({
 }));
 
 import { CodexLiveSession, resolveCodexSessionOptions } from '../../client/providers/codex-live-session.js';
-import { loadCodexProviderConfig } from '../../client/providers/codex-config.js';
+import {
+  loadCodexProviderConfig,
+  probeCodexWorkspaceSandbox,
+} from '../../client/providers/codex-config.js';
 import { CodexSDKProvider, toCodexReasoningEffort } from '../../client/providers/codex-sdk.js';
 
 describe('CodexSDKProvider', () => {
@@ -39,6 +50,7 @@ describe('CodexSDKProvider', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    childProcessMocks.spawnSync.mockReturnValue({ status: 0, stderr: '', stdout: '' });
     delete process.env.TL_MCP_TOKEN;
     delete process.env.TL_REMOTE_TOKEN;
     delete process.env.TL_TOKEN;
@@ -131,13 +143,152 @@ describe('CodexSDKProvider', () => {
   });
 
   it('keeps Codex defaults local to the Codex provider config', () => {
-    expect(loadCodexProviderConfig({ defaultModel: 'gpt-5.5', get: (_key, fallback = '') => fallback }))
-      .toEqual({
+    expect(
+      loadCodexProviderConfig({
+        defaultModel: 'gpt-5.5',
+        get: (_key, fallback = '') => fallback,
+        sandboxProbe: () => ({ supported: true }),
+      }),
+    ).toEqual({
         model: 'gpt-5.5',
         sandboxMode: 'workspace-write',
         approvalPolicy: 'on-request',
         skipGitRepoCheck: false,
       });
+  });
+
+  it('falls back when the default Codex workspace sandbox is blocked by bwrap', () => {
+    const warn = vi.fn();
+
+    expect(
+      loadCodexProviderConfig({
+        get: (_key, fallback = '') => fallback,
+        sandboxProbe: () => ({
+          supported: false,
+          reason: 'bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted',
+        }),
+        warn,
+      }),
+    ).toEqual({
+      sandboxMode: 'danger-full-access',
+      approvalPolicy: 'on-request',
+      skipGitRepoCheck: false,
+    });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('falling back to danger-full-access'));
+  });
+
+  it('passes the sandbox fallback through to SDK thread creation', () => {
+    const config = loadCodexProviderConfig({
+      get: (_key, fallback = '') => fallback,
+      sandboxProbe: () => ({ supported: false }),
+      warn: vi.fn(),
+    });
+
+    new CodexSDKProvider(config).createSession({ workingDirectory: '/repo' });
+
+    expect(codexSdkMocks.startThread).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workingDirectory: '/repo',
+        sandboxMode: 'danger-full-access',
+      }),
+    );
+  });
+
+  it('never probes or relaxes an explicitly configured Codex sandbox', () => {
+    const sandboxProbe = vi.fn(() => ({ supported: false }));
+
+    expect(
+      loadCodexProviderConfig({
+        get: (key, fallback = '') =>
+          key === 'TL_CODEX_SANDBOX_MODE' ? 'workspace-write' : fallback,
+        sandboxProbe,
+      }),
+    ).toEqual({
+      sandboxMode: 'workspace-write',
+      approvalPolicy: 'on-request',
+      skipGitRepoCheck: false,
+    });
+    expect(sandboxProbe).not.toHaveBeenCalled();
+  });
+
+  it('probes the current Codex Linux sandbox syntax used by workspace-write', () => {
+    expect(probeCodexWorkspaceSandbox('/opt/codex', 'linux')).toEqual({ supported: true });
+    expect(childProcessMocks.spawnSync).toHaveBeenCalledWith(
+      '/opt/codex',
+      ['sandbox', '--', '/bin/true'],
+      {
+        encoding: 'utf8',
+        timeout: 5000,
+      },
+    );
+  });
+
+  it('recognizes the bwrap loopback permission failure from the Linux sandbox probe', () => {
+    childProcessMocks.spawnSync.mockReturnValue({
+      status: 1,
+      stderr: 'bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted\n',
+      stdout: '',
+    });
+
+    expect(probeCodexWorkspaceSandbox(undefined, 'linux')).toEqual({
+      supported: false,
+      reason: 'bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted',
+    });
+  });
+
+  it('retries the platform subcommand required by Codex 0.132', () => {
+    childProcessMocks.spawnSync
+      .mockReturnValueOnce({
+        status: 2,
+        stderr: "error: unrecognized subcommand '/bin/true'\n",
+        stdout: '',
+      })
+      .mockReturnValueOnce({ status: 0, stderr: '', stdout: '' });
+
+    expect(probeCodexWorkspaceSandbox('/opt/codex', 'linux')).toEqual({ supported: true });
+    expect(childProcessMocks.spawnSync).toHaveBeenNthCalledWith(
+      2,
+      '/opt/codex',
+      ['sandbox', 'linux', '--', '/bin/true'],
+      {
+        encoding: 'utf8',
+        timeout: 5000,
+      },
+    );
+  });
+
+  it('recognizes bwrap permission failures after the Codex 0.132 syntax retry', () => {
+    childProcessMocks.spawnSync
+      .mockReturnValueOnce({
+        status: 2,
+        stderr: "error: unrecognized subcommand '/bin/true'\n",
+        stdout: '',
+      })
+      .mockReturnValueOnce({
+        status: 1,
+        stderr: 'bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted\n',
+        stdout: '',
+      });
+
+    expect(probeCodexWorkspaceSandbox(undefined, 'linux')).toEqual({
+      supported: false,
+      reason: 'bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted',
+    });
+  });
+
+  it('does not disable sandboxing when the probe fails for an unrelated reason', () => {
+    childProcessMocks.spawnSync.mockReturnValue({
+      status: 2,
+      stderr: 'error: unrecognized subcommand',
+      stdout: '',
+    });
+
+    expect(probeCodexWorkspaceSandbox(undefined, 'linux')).toEqual({ supported: true });
+  });
+
+  it('does not probe Codex sandbox support outside Linux', () => {
+    expect(probeCodexWorkspaceSandbox('/opt/codex', 'darwin')).toEqual({ supported: true });
+    expect(childProcessMocks.spawnSync).not.toHaveBeenCalled();
   });
 
   it('injects TLive MCP only into the SDK-created Codex process', () => {

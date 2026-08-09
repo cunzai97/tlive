@@ -172,13 +172,18 @@ Codex runtime 配置：
 ```env
 TL_CODEX_MODEL=
 TL_CODEX_PATH=
-TL_CODEX_SANDBOX_MODE=workspace-write
+TL_CODEX_SANDBOX_MODE=auto
 TL_CODEX_APPROVAL_POLICY=on-request
 TL_CODEX_SKIP_GIT_REPO_CHECK=false
 TL_CODEX_REASONING_EFFORT=
 TL_CODEX_NETWORK_ACCESS=
 TL_CODEX_WEB_SEARCH=
 ```
+
+`TL_CODEX_SANDBOX_MODE` 默认为 `auto`：启动时先探测 Codex 的 `workspace-write`
+沙箱；若 Linux 上的 bwrap/AppArmor 明确拒绝 user/network namespace，则打印告警并降级为
+`danger-full-access`，避免 `pwd`、`ls` 等命令在执行前就失败。若安全策略要求禁止自动降级，请显式设为
+`workspace-write` 并先修复宿主机的 bwrap/AppArmor 配置。
 
 Pi runtime 配置：
 

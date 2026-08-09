@@ -58,6 +58,25 @@ Use `/settings user|full|isolated` to override Claude settings for the current c
 - `full`: user + project + local settings
 - `isolated`: ignore external settings for this chat
 
+Codex provider options:
+
+```env
+# ~/.tlive/client.env
+TL_CODEX_MODEL=
+TL_CODEX_PATH=
+TL_CODEX_SANDBOX_MODE=auto
+TL_CODEX_APPROVAL_POLICY=on-request
+TL_CODEX_SKIP_GIT_REPO_CHECK=false
+TL_CODEX_REASONING_EFFORT=
+TL_CODEX_NETWORK_ACCESS=
+TL_CODEX_WEB_SEARCH=
+```
+
+On Linux, `auto` probes the Codex `workspace-write` sandbox. If bwrap/AppArmor rejects the
+required namespace setup, TLive warns and falls back to `danger-full-access`. This removes the
+Codex filesystem sandbox. Set `workspace-write` explicitly to prohibit that fallback and require
+the host sandbox policy to be fixed instead.
+
 Pi provider options:
 
 ```env

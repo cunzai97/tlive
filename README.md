@@ -186,13 +186,19 @@ Codex runtime options:
 ```env
 TL_CODEX_MODEL=
 TL_CODEX_PATH=
-TL_CODEX_SANDBOX_MODE=workspace-write
+TL_CODEX_SANDBOX_MODE=auto
 TL_CODEX_APPROVAL_POLICY=on-request
 TL_CODEX_SKIP_GIT_REPO_CHECK=false
 TL_CODEX_REASONING_EFFORT=
 TL_CODEX_NETWORK_ACCESS=
 TL_CODEX_WEB_SEARCH=
 ```
+
+`TL_CODEX_SANDBOX_MODE` defaults to `auto`. At startup, TLive probes Codex
+`workspace-write`; when bwrap/AppArmor explicitly rejects the required Linux user or network
+namespace, TLive logs a warning and falls back to `danger-full-access` so even basic commands such
+as `pwd` and `ls` can run. Set it explicitly to `workspace-write` to forbid this fallback and fix
+the host bwrap/AppArmor policy instead.
 
 Pi runtime options:
 
