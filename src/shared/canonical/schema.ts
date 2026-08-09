@@ -60,6 +60,7 @@ const usageSchema = z.object({
   outputTokens: z.number(),
   cachedInputTokens: z.number().optional(),
   reasoningOutputTokens: z.number().optional(),
+  contextTokens: z.number().optional(),
   costUsd: z.number().optional(),
 });
 

@@ -1,5 +1,5 @@
 import type { ThreadEvent, ThreadItem, Usage } from '@openai/codex-sdk';
-import { canonicalEventSchema, type CanonicalEvent } from '../../shared/canonical/schema.js';
+import { type CanonicalEvent, canonicalEventSchema } from '../../shared/canonical/schema.js';
 
 interface CodexAdapterState {
   threadId?: string;

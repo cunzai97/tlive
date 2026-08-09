@@ -394,6 +394,46 @@ describe('ClaudeAdapter', () => {
           cachedInputTokens: 4000,
         },
       });
+      expect((events[0] as any).usage).not.toHaveProperty('contextTokens');
+    });
+
+    it('uses the latest top-level assistant call for current context, not cumulative result usage', () => {
+      adapter.mapMessage({
+        type: 'assistant',
+        parent_tool_use_id: null,
+        message: {
+          content: [{ type: 'text', text: 'done' }],
+          usage: {
+            input_tokens: 800,
+            cache_creation_input_tokens: 200,
+            cache_read_input_tokens: 9000,
+            output_tokens: 75,
+          },
+        },
+      });
+
+      const events = adapter.mapMessage({
+        type: 'result',
+        subtype: 'success',
+        session_id: 'sess_context',
+        is_error: false,
+        usage: {
+          input_tokens: 5000,
+          cache_creation_input_tokens: 1000,
+          cache_read_input_tokens: 30000,
+          output_tokens: 500,
+        },
+      });
+
+      expect(events[0]).toMatchObject({
+        kind: 'query_result',
+        usage: {
+          inputTokens: 36000,
+          outputTokens: 500,
+          cachedInputTokens: 30000,
+          contextTokens: 10075,
+        },
+      });
     });
 
     it('maps success result with permission denials', () => {

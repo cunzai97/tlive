@@ -1,20 +1,20 @@
-import { mkdirSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { extname, join } from 'node:path';
-import type { BridgeStore } from '../store/interface.js';
+import type { TodoStatus } from '../../shared/canonical/schema.js';
 import type { AgentSettingSource } from '../../shared/config.js';
+import { getTliveHome } from '../../shared/core/path.js';
 import type {
+  AgentProvider,
+  AskUserQuestionHandler,
+  DeferredToolHandler,
+  EffortLevel,
   FileAttachment,
   PermissionRequestHandler,
   QueryControls,
   StreamChatResult,
-  EffortLevel,
-  AskUserQuestionHandler,
-  DeferredToolHandler,
-  AgentProvider,
 } from '../../shared/providers/base.js';
-import type { TodoStatus } from '../../shared/canonical/schema.js';
-import { getTliveHome } from '../../shared/core/path.js';
+import type { BridgeStore } from '../store/interface.js';
 
 const TEXT_MIME_PREFIXES = [
   'text/',
@@ -141,6 +141,7 @@ interface ProcessMessageParams {
       outputTokens: number;
       cachedInputTokens?: number;
       reasoningOutputTokens?: number;
+      contextTokens?: number;
       costUsd?: number;
       modelUsage?: Record<
         string,
@@ -185,7 +186,11 @@ interface ProcessMessageParams {
     error?: string;
   }) => void;
   onCompactBoundary?: (data: { trigger: 'manual' | 'auto'; preTokens?: number }) => void;
-  onContextUsage?: (data: { tokens: number | null; contextWindow: number; percent: number | null }) => void;
+  onContextUsage?: (data: {
+    tokens: number | null;
+    contextWindow: number;
+    percent: number | null;
+  }) => void;
   onThinkingDelta?: (delta: string) => void;
   onTodoUpdate?: (todos: Array<{ content: string; status: TodoStatus }>) => void;
   /** Provider selected for this logical turn. */
@@ -214,6 +219,7 @@ interface ProcessMessageResult {
     outputTokens: number;
     cachedInputTokens?: number;
     reasoningOutputTokens?: number;
+    contextTokens?: number;
     costUsd?: number;
   };
 }

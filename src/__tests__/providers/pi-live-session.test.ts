@@ -43,18 +43,17 @@ describe('PiLiveSession', () => {
   });
 
   it('creates a Pi SDK session and streams canonical events', async () => {
-    const messages = [
-      {
-        role: 'assistant',
-        usage: {
-          input: 3,
-          output: 2,
-          cacheRead: 0,
-          cacheWrite: 0,
-          cost: { total: 0.001 },
-        },
+    const finalMessage = {
+      role: 'assistant',
+      usage: {
+        input: 3,
+        output: 2,
+        cacheRead: 0,
+        cacheWrite: 0,
+        cost: { total: 0.001 },
       },
-    ];
+    };
+    const messages: unknown[] = [];
     const listeners: Array<(event: any) => void> = [];
     const session = {
       sessionFile: '/tmp/pi-session.jsonl',
@@ -76,13 +75,19 @@ describe('PiLiveSession', () => {
           });
         }
         for (const listener of listeners) {
-          listener({ type: 'agent_end', messages, willRetry: false });
+          listener({ type: 'agent_end', messages: [], willRetry: false });
         }
+        messages.push(finalMessage);
       }),
       steer: vi.fn(),
       followUp: vi.fn(),
       abort: vi.fn(),
       dispose: vi.fn(),
+      getContextUsage: vi.fn(() => ({
+        tokens: 5,
+        contextWindow: 128000,
+        percent: (5 / 128000) * 100,
+      })),
     };
     piSdkMocks.createAgentSession.mockResolvedValue({ session });
 
@@ -108,12 +113,19 @@ describe('PiLiveSession', () => {
       },
       { kind: 'text_delta', text: 'done' },
       {
+        kind: 'context_usage',
+        tokens: 5,
+        contextWindow: 128000,
+        percent: (5 / 128000) * 100,
+      },
+      {
         kind: 'query_result',
         sessionId: '/tmp/pi-session.jsonl',
         isError: false,
         usage: {
           inputTokens: 3,
           outputTokens: 2,
+          contextTokens: 5,
           costUsd: 0.001,
         },
       },

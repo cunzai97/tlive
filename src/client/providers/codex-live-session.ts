@@ -21,6 +21,7 @@ import type {
   TurnParams,
 } from '../../shared/providers/base.js';
 import { preparePromptWithImages } from './prompt-media.js';
+import { readCodexContextUsage } from './session-scanner.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -146,23 +147,59 @@ export class CodexLiveSession implements LiveSession {
   }
 
   private async consumeTurn(input: Input, context: CodexTurnContext): Promise<void> {
+    let terminalEvent: Extract<CanonicalEvent, { kind: 'query_result' }> | undefined;
     try {
       const { events } = await this.thread.runStreamed(input, {
         signal: context.abortController.signal,
       });
       for await (const event of events) {
         for (const mapped of context.adapter.mapEvent(event)) {
-          this.enqueueTurnEvent(context, mapped);
+          if (mapped.kind === 'query_result') terminalEvent = mapped;
+          else this.enqueueTurnEvent(context, mapped);
         }
         this.rememberActiveSessionId(context);
       }
     } catch (err) {
       for (const mapped of context.adapter.mapError(err, context.abortController.signal.aborted)) {
-        this.enqueueTurnEvent(context, mapped);
+        if (mapped.kind === 'query_result') terminalEvent = mapped;
+        else this.enqueueTurnEvent(context, mapped);
       }
     } finally {
+      if (terminalEvent) this.enqueueTerminalEvent(context, terminalEvent);
       this.finishTurnContext(context);
     }
+  }
+
+  private enqueueTerminalEvent(
+    context: CodexTurnContext,
+    event: Extract<CanonicalEvent, { kind: 'query_result' }>,
+  ): void {
+    if (context.closed || event.isError) {
+      this.enqueueTurnEvent(context, event);
+      return;
+    }
+
+    const contextUsage = readCodexContextUsage(event.sessionId);
+    if (!contextUsage) {
+      this.enqueueTurnEvent(context, event);
+      return;
+    }
+
+    if (contextUsage.contextWindow !== undefined) {
+      this.enqueueTurnEvent(context, {
+        kind: 'context_usage',
+        tokens: contextUsage.tokens,
+        contextWindow: contextUsage.contextWindow,
+        percent:
+          contextUsage.contextWindow > 0
+            ? (contextUsage.tokens / contextUsage.contextWindow) * 100
+            : null,
+      });
+    }
+    this.enqueueTurnEvent(context, {
+      ...event,
+      usage: { ...event.usage, contextTokens: contextUsage.tokens },
+    });
   }
 
   private createTurnContext(): CodexTurnContext {

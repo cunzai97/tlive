@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { Input, RunStreamedResult, ThreadEvent, TurnOptions } from '@openai/codex-sdk';
+import type { CanonicalEvent } from '../../shared/canonical/schema.js';
 
 const codexSdkMocks = vi.hoisted(() => ({
   codexConstructor: vi.fn(),
@@ -322,6 +323,56 @@ describe('CodexSDKProvider', () => {
     });
   });
 
+  it('reports current context from the latest rollout call instead of cumulative turn usage', async () => {
+    const codexHome = mkdtempSync(join(tmpdir(), 'tlive-codex-usage-'));
+    const sessionId = '019fe567-8b11-7f30-b9b5-382f59209bc6';
+    const sessionDir = join(codexHome, 'sessions', '2026', '08', '09');
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(
+      join(sessionDir, `rollout-2026-08-09T15-23-16-${sessionId}.jsonl`),
+      [
+        tokenCountLine(10669, 258400),
+        tokenCountLine(10819, 258400, {
+          input_tokens: 21346,
+          cached_input_tokens: 11776,
+          output_tokens: 142,
+          total_tokens: 21488,
+        }),
+      ].join('\n'),
+    );
+    process.env.CODEX_HOME = codexHome;
+    codexSdkMocks.runStreamed.mockResolvedValue({ events: usageEvents(sessionId) });
+
+    try {
+      const session = new CodexLiveSession({ workingDirectory: '/repo' });
+      const events = await collect(session.startTurn('hello').stream);
+
+      expect(events).toEqual([
+        { kind: 'status', sessionId },
+        {
+          kind: 'context_usage',
+          tokens: 10819,
+          contextWindow: 258400,
+          percent: (10819 / 258400) * 100,
+        },
+        {
+          kind: 'query_result',
+          sessionId,
+          isError: false,
+          usage: {
+            inputTokens: 21346,
+            cachedInputTokens: 11776,
+            outputTokens: 142,
+            reasoningOutputTokens: 12,
+            contextTokens: 10819,
+          },
+        },
+      ]);
+    } finally {
+      rmSync(codexHome, { recursive: true, force: true });
+    }
+  });
+
   it('keeps an aborted turn from closing a newer turn stream', async () => {
     const firstAbortObserved = deferred<void>();
     const releaseFirstRun = deferred<void>();
@@ -368,6 +419,57 @@ async function* secondTurnEvents(ready: Promise<void>): AsyncGenerator<ThreadEve
     type: 'item.updated',
     item: { id: 'msg-2', type: 'agent_message', text: 'second still open' },
   };
+}
+
+async function* usageEvents(sessionId: string): AsyncGenerator<ThreadEvent> {
+  yield { type: 'thread.started', thread_id: sessionId };
+  yield {
+    type: 'turn.completed',
+    usage: {
+      input_tokens: 21346,
+      cached_input_tokens: 11776,
+      output_tokens: 142,
+      reasoning_output_tokens: 12,
+    },
+  };
+}
+
+function tokenCountLine(
+  lastTotalTokens: number,
+  contextWindow: number,
+  totalTokenUsage = {
+    input_tokens: 10592,
+    cached_input_tokens: 3840,
+    output_tokens: 77,
+    total_tokens: 10669,
+  },
+): string {
+  return JSON.stringify({
+    type: 'event_msg',
+    payload: {
+      type: 'token_count',
+      info: {
+        total_token_usage: totalTokenUsage,
+        last_token_usage: {
+          input_tokens: lastTotalTokens - 65,
+          cached_input_tokens: 7936,
+          output_tokens: 65,
+          total_tokens: lastTotalTokens,
+        },
+        model_context_window: contextWindow,
+      },
+    },
+  });
+}
+
+async function collect(stream: ReadableStream<CanonicalEvent>): Promise<CanonicalEvent[]> {
+  const reader = stream.getReader();
+  const events: CanonicalEvent[] = [];
+  while (true) {
+    const next = await reader.read();
+    if (next.done) return events;
+    events.push(next.value);
+  }
 }
 
 function deferred<T>(): {

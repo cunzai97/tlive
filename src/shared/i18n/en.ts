@@ -296,10 +296,11 @@ export const en: Translations = {
     '⚠️ Current execution engine does not support settings source switching',
 
   // --- cost-tracker ---
-  'cost.input': 'input',
+  'cost.input': 'input (uncached)',
   'cost.output': 'output',
   'cost.reasoning': 'reasoning',
-  'cost.cached': 'cached',
+  'cost.cached': 'input (cached)',
+  'cost.context': 'current context',
 
   // --- format-session-list ---
   'sessionList.stateRunning': 'Running',
@@ -523,7 +524,8 @@ export const en: Translations = {
   'form.submitWithoutAnswer': '⚠️ Please enter an answer or choose an option before submitting.',
 
   // --- query recovery ---
-  'queryRecovery.staleSessionFallback': '🔄 Old session unrecoverable, started a new session for you',
+  'queryRecovery.staleSessionFallback':
+    '🔄 Old session unrecoverable, started a new session for you',
 
   // --- home model ---
   'homeModel.agentSession': 'Agent session',

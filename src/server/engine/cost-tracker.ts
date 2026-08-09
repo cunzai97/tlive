@@ -1,4 +1,4 @@
-import { t, type Locale } from '../../shared/i18n/index.js';
+import { type Locale, t } from '../../shared/i18n/index.js';
 
 export interface ModelUsageEntry {
   inputTokens: number;
@@ -13,6 +13,7 @@ export interface UsageStats {
   outputTokens: number;
   cachedInputTokens?: number;
   reasoningOutputTokens?: number;
+  contextTokens?: number;
   costUsd: number;
   costEstimated: boolean;
   durationMs: number;
@@ -64,6 +65,7 @@ export class CostTracker {
     output_tokens: number;
     cached_input_tokens?: number;
     reasoning_output_tokens?: number;
+    context_tokens?: number;
     cost_usd?: number;
     model_usage?: Record<string, ModelUsageEntry>;
   }): UsageStats {
@@ -84,6 +86,7 @@ export class CostTracker {
       ...(usage.reasoning_output_tokens !== undefined
         ? { reasoningOutputTokens: usage.reasoning_output_tokens }
         : {}),
+      ...(usage.context_tokens !== undefined ? { contextTokens: usage.context_tokens } : {}),
       costUsd,
       costEstimated: estimatedCost !== undefined,
       durationMs,
@@ -99,23 +102,28 @@ export class CostTracker {
 
   static format(stats: UsageStats, _locale: Locale = 'zh'): string {
     const duration = formatDuration(stats.durationMs);
-    // When tokens are 0, show only duration.
-    if (stats.inputTokens === 0 && stats.outputTokens === 0) {
+    // When providers report neither turn usage nor context, show only duration.
+    if (stats.inputTokens === 0 && stats.outputTokens === 0 && stats.contextTokens === undefined) {
       return duration;
     }
 
     const cachedInputTokens = positiveNumber(stats.cachedInputTokens);
     const freshInputTokens = Math.max(0, stats.inputTokens - cachedInputTokens);
     const reasoningOutputTokens = positiveNumber(stats.reasoningOutputTokens);
+    const contextTokens =
+      stats.contextTokens !== undefined && Number.isFinite(stats.contextTokens)
+        ? Math.max(0, stats.contextTokens)
+        : undefined;
     const tokenParts = [
       `${t('cost.input')} ${formatTokens(freshInputTokens)}`,
+      `${t('cost.cached')} ${formatTokens(cachedInputTokens)}`,
       `${t('cost.output')} ${formatTokens(stats.outputTokens)}`,
     ];
     if (reasoningOutputTokens > 0) {
       tokenParts.push(`${t('cost.reasoning')} ${formatTokens(reasoningOutputTokens)}`);
     }
-    if (cachedInputTokens > 0) {
-      tokenParts.push(`${t('cost.cached')} ${formatTokens(cachedInputTokens)}`);
+    if (contextTokens !== undefined) {
+      tokenParts.push(`${t('cost.context')} ${formatTokens(contextTokens)}`);
     }
     const tokens = tokenParts.join(' / ');
 

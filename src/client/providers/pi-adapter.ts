@@ -1,5 +1,5 @@
 import type { AgentSessionEvent } from '@earendil-works/pi-coding-agent';
-import { canonicalEventSchema, type CanonicalEvent } from '../../shared/canonical/schema.js';
+import { type CanonicalEvent, canonicalEventSchema } from '../../shared/canonical/schema.js';
 
 interface PiAdapterState {
   sessionId?: string;
@@ -7,6 +7,7 @@ interface PiAdapterState {
   reasoningEffort?: string;
   startedTools: Set<string>;
   terminalEmitted: boolean;
+  pendingMessages?: unknown[];
 }
 
 export class PiAdapter {
@@ -81,8 +82,7 @@ export class PiAdapter {
         break;
       case 'agent_end':
         if (!event.willRetry) {
-          events.push(this.queryResult(event.messages, false));
-          this.state.terminalEmitted = true;
+          this.state.pendingMessages = event.messages;
         }
         break;
       case 'auto_retry_start':
@@ -105,10 +105,14 @@ export class PiAdapter {
     return events.map((e) => canonicalEventSchema.parse(e));
   }
 
-  mapComplete(messages: unknown[] = []): CanonicalEvent[] {
+  mapComplete(messages: unknown[] = [], contextTokens?: number): CanonicalEvent[] {
     if (this.state.terminalEmitted) return [];
     this.state.terminalEmitted = true;
-    return [canonicalEventSchema.parse(this.queryResult(messages, false))];
+    const pendingMessages = this.state.pendingMessages ?? [];
+    const finalMessages = pendingMessages.length > 0 ? pendingMessages : messages;
+    return [
+      canonicalEventSchema.parse(this.queryResult(finalMessages, false, undefined, contextTokens)),
+    ];
   }
 
   mapError(error: unknown, interrupted = false): CanonicalEvent[] {
@@ -136,14 +140,22 @@ export class PiAdapter {
     }
   }
 
-  private queryResult(messages: unknown[], isError: boolean, error?: string): CanonicalEvent {
+  private queryResult(
+    messages: unknown[],
+    isError: boolean,
+    error?: string,
+    contextTokens?: number,
+  ): CanonicalEvent {
     const usage = usageFromMessages(messages);
     const latestError = error ?? latestAssistantError(messages);
     return {
       kind: 'query_result',
       sessionId: this.state.sessionId ?? '',
       isError: isError || Boolean(latestError),
-      usage,
+      usage: {
+        ...usage,
+        ...(contextTokens !== undefined ? { contextTokens } : {}),
+      },
       ...(latestError ? { error: latestError } : {}),
     };
   }
@@ -172,9 +184,10 @@ function usageFromMessages(messages: unknown[]): {
   cachedInputTokens?: number;
   costUsd?: number;
 } {
-  let inputTokens = 0;
+  let uncachedInputTokens = 0;
   let outputTokens = 0;
   let cachedInputTokens = 0;
+  let cacheWriteInputTokens = 0;
   let costUsd = 0;
 
   for (const message of messages) {
@@ -190,18 +203,19 @@ function usageFromMessages(messages: unknown[]): {
       };
     };
     if (typed.role !== 'assistant' || !typed.usage) continue;
-    inputTokens += numberValue(typed.usage.input);
+    uncachedInputTokens += numberValue(typed.usage.input);
     outputTokens += numberValue(typed.usage.output);
-    cachedInputTokens += numberValue(typed.usage.cacheRead) + numberValue(typed.usage.cacheWrite);
+    cachedInputTokens += numberValue(typed.usage.cacheRead);
+    cacheWriteInputTokens += numberValue(typed.usage.cacheWrite);
     costUsd += numberValue(typed.usage.cost?.total);
   }
 
   console.log(
-    `[pi-adapter] usageFromMessages: input=${inputTokens} output=${outputTokens} cached=${cachedInputTokens} cost=${costUsd.toFixed(4)}$`,
+    `[pi-adapter] usageFromMessages: uncached=${uncachedInputTokens + cacheWriteInputTokens} output=${outputTokens} cached=${cachedInputTokens} cost=${costUsd.toFixed(4)}$`,
   );
 
   return {
-    inputTokens,
+    inputTokens: uncachedInputTokens + cachedInputTokens + cacheWriteInputTokens,
     outputTokens,
     ...(cachedInputTokens ? { cachedInputTokens } : {}),
     ...(costUsd ? { costUsd } : {}),

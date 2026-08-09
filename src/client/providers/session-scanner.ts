@@ -24,6 +24,11 @@ export interface SessionTranscriptMessage {
   timestamp?: string;
 }
 
+export interface CodexContextUsage {
+  tokens: number;
+  contextWindow?: number;
+}
+
 type SessionCandidate = {
   filePath: string;
   projectDir: string;
@@ -97,6 +102,47 @@ export function scanCodexSessions(limit = 10, filterByCwd?: string): ScannedSess
  */
 export function scanPiSessions(limit = 10, filterByCwd?: string): ScannedSession[] {
   return filterAndLimit(getPiSessions(), limit, filterByCwd);
+}
+
+/**
+ * Read the latest model-call context size from a Codex rollout.
+ *
+ * Codex's streamed turn usage is cumulative across all model calls in a turn,
+ * so it cannot be used as the current context size. The rollout token_count
+ * event separately records the latest call in last_token_usage.
+ */
+export function readCodexContextUsage(sessionId: string): CodexContextUsage | undefined {
+  if (!sessionId) return undefined;
+
+  const filePath = findCodexSessionFile(codexSessionsDir(), sessionId);
+  if (!filePath) return undefined;
+
+  try {
+    const st = statSync(filePath);
+    const tail = readWindow(filePath, st.size, SESSION_TAIL_READ_SIZE, 'tail');
+    for (const rawLine of tail.split('\n').reverse()) {
+      const line = rawLine.trim();
+      if (!line) continue;
+      try {
+        const obj = JSON.parse(line);
+        if (obj?.type !== 'event_msg' || obj?.payload?.type !== 'token_count') continue;
+        const info = obj.payload.info;
+        const tokens = nonNegativeFiniteNumber(info?.last_token_usage?.total_tokens);
+        if (tokens === undefined) return undefined;
+        const contextWindow = nonNegativeFiniteNumber(info?.model_context_window);
+        return {
+          tokens,
+          ...(contextWindow !== undefined ? { contextWindow } : {}),
+        };
+      } catch {
+        // Ignore malformed/incomplete tail lines.
+      }
+    }
+  } catch {
+    // The rollout may disappear or still be unavailable at turn completion.
+  }
+
+  return undefined;
 }
 
 function getClaudeSessions(): ScannedSession[] {
@@ -205,7 +251,7 @@ function doScanClaude(): ScannedSession[] {
 }
 
 function doScanCodex(): ScannedSession[] {
-  const sessionsDir = join(homedir(), '.codex', 'sessions');
+  const sessionsDir = codexSessionsDir();
   const candidates: SessionCandidate[] = [];
   collectJsonlCandidates(sessionsDir, sessionsDir, candidates);
   candidates.sort((a, b) => b.mtime - a.mtime);
@@ -222,6 +268,33 @@ function doScanCodex(): ScannedSession[] {
     if (parsed) sessions.push(parsed);
   }
   return sessions;
+}
+
+function codexSessionsDir(): string {
+  const codexHome = process.env.CODEX_HOME?.trim() || join(homedir(), '.codex');
+  return join(codexHome, 'sessions');
+}
+
+function findCodexSessionFile(dirPath: string, sessionId: string): string | undefined {
+  let entries: Dirent[];
+  try {
+    entries = readdirSync(dirPath, { withFileTypes: true });
+  } catch {
+    return undefined;
+  }
+
+  for (const entry of entries) {
+    const entryPath = join(dirPath, entry.name);
+    if (entry.isDirectory()) {
+      const nested = findCodexSessionFile(entryPath, sessionId);
+      if (nested) return nested;
+      continue;
+    }
+    if (entry.name.endsWith(`-${sessionId}.jsonl`) || entry.name === `${sessionId}.jsonl`) {
+      return entryPath;
+    }
+  }
+  return undefined;
 }
 
 function doScanPi(): ScannedSession[] {
@@ -754,6 +827,10 @@ function sessionIdFromFilename(filename: string): string {
     /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i,
   );
   return match?.[1] ?? filename.replace(/\.jsonl$/, '');
+}
+
+function nonNegativeFiniteNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
 /** Decode project directory name back to path: "-home-yhh-myproject" → "/home/yhh/myproject" */

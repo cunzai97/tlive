@@ -1,17 +1,16 @@
-import {
-  AuthStorage,
-  createAgentSession,
-  ModelRegistry,
-  SessionManager as PiSessionManager,
-  getAgentDir,
-  type AgentSession,
-  type CreateAgentSessionOptions,
-} from '@earendil-works/pi-coding-agent';
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { PiAdapter } from './pi-adapter.js';
-import { createPiAskBridge } from './pi-ask-bridge.js';
+import {
+  type AgentSession,
+  AuthStorage,
+  type CreateAgentSessionOptions,
+  createAgentSession,
+  getAgentDir,
+  ModelRegistry,
+  SessionManager as PiSessionManager,
+} from '@earendil-works/pi-coding-agent';
 import type { CanonicalEvent } from '../../shared/canonical/schema.js';
+import { expandTilde } from '../../shared/core/path.js';
 import type {
   AgentRuntimeInfo,
   CreateSessionParams,
@@ -22,9 +21,10 @@ import type {
   StreamChatResult,
   TurnParams,
 } from '../../shared/providers/base.js';
-import type { AskUserQuestionHandler } from '../../shared/providers/types.js';
 import type { EffortLevel } from '../../shared/providers/effort.js';
-import { expandTilde } from '../../shared/core/path.js';
+import type { AskUserQuestionHandler } from '../../shared/providers/types.js';
+import { PiAdapter } from './pi-adapter.js';
+import { createPiAskBridge } from './pi-ask-bridge.js';
 import type { PiRuntimeOptions, PiThinkingLevel } from './pi-config.js';
 
 export type PiSessionOptions = CreateSessionParams & PiRuntimeOptions;
@@ -143,6 +143,7 @@ export class PiLiveSession implements LiveSession {
     let unsubscribe: (() => void) | undefined;
     try {
       const session = await this.getOrCreateSession(params);
+      const initialMessageCount = session.messages.length;
       context.adapter.updateRuntime({
         sessionId: this.sdkSessionId,
         model: this._runtimeInfo.model,
@@ -189,9 +190,14 @@ export class PiLiveSession implements LiveSession {
           percent: ctxUsage.percent,
         });
       } else {
-        console.log(`[pi] contextUsage: undefined (model=${session.model?.id ?? 'none'}, window=${session.model?.contextWindow ?? 0})`);
+        console.log(
+          `[pi] contextUsage: undefined (model=${session.model?.id ?? 'none'}, window=${session.model?.contextWindow ?? 0})`,
+        );
       }
-      for (const mapped of context.adapter.mapComplete(session.messages)) {
+      for (const mapped of context.adapter.mapComplete(
+        session.messages.slice(initialMessageCount),
+        ctxUsage?.tokens ?? undefined,
+      )) {
         this.enqueueTurnEvent(context, mapped);
       }
     } catch (err) {
@@ -252,7 +258,9 @@ export class PiLiveSession implements LiveSession {
   }
 
   private createAuthStorage(): AuthStorage {
-    const agentDir = this.options.agentDir ? resolve(expandTilde(this.options.agentDir)) : undefined;
+    const agentDir = this.options.agentDir
+      ? resolve(expandTilde(this.options.agentDir))
+      : undefined;
     return AuthStorage.create(agentDir ? join(agentDir, 'auth.json') : undefined);
   }
 
@@ -285,7 +293,9 @@ export class PiLiveSession implements LiveSession {
     if (!modelPattern) {
       if (!this.options.provider) return undefined;
       const model =
-        modelRegistry.getAvailable().find((candidate) => candidate.provider === this.options.provider) ??
+        modelRegistry
+          .getAvailable()
+          .find((candidate) => candidate.provider === this.options.provider) ??
         modelRegistry.getAll().find((candidate) => candidate.provider === this.options.provider);
       if (!model) throw new Error(`Pi provider not found: ${this.options.provider}`);
       return model;

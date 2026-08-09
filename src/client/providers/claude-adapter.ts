@@ -6,7 +6,7 @@
  * for dedup, and hidden tool IDs for filtering.
  */
 
-import { canonicalEventSchema, type CanonicalEvent } from '../../shared/canonical/schema.js';
+import { type CanonicalEvent, canonicalEventSchema } from '../../shared/canonical/schema.js';
 
 // SDK types are loose — we define the shapes we actually consume.
 export interface SDKMessage {
@@ -38,17 +38,34 @@ interface CanonicalUsage extends Record<string, unknown> {
   inputTokens: number;
   outputTokens: number;
   cachedInputTokens?: number;
+  contextTokens?: number;
   costUsd?: number;
 }
 
-function mapUsage(usage: ClaudeUsage | undefined, costUsd: unknown): CanonicalUsage {
+function totalTokens(usage: ClaudeUsage): number {
+  return (
+    (usage.input_tokens ?? 0) +
+    (usage.cache_creation_input_tokens ?? 0) +
+    (usage.cache_read_input_tokens ?? 0) +
+    (usage.output_tokens ?? 0)
+  );
+}
+
+function mapUsage(
+  usage: ClaudeUsage | undefined,
+  costUsd: unknown,
+  contextTokens?: number,
+): CanonicalUsage {
   const inputTokens = usage?.input_tokens ?? 0;
   const cacheCreationInputTokens = usage?.cache_creation_input_tokens ?? 0;
   const cacheReadInputTokens = usage?.cache_read_input_tokens ?? 0;
+  const totalInputTokens = inputTokens + cacheCreationInputTokens + cacheReadInputTokens;
+  const outputTokens = usage?.output_tokens ?? 0;
   return {
-    inputTokens: inputTokens + cacheCreationInputTokens + cacheReadInputTokens,
-    outputTokens: usage?.output_tokens ?? 0,
+    inputTokens: totalInputTokens,
+    outputTokens,
     ...(cacheReadInputTokens > 0 ? { cachedInputTokens: cacheReadInputTokens } : {}),
+    ...(contextTokens !== undefined ? { contextTokens } : {}),
     ...(typeof costUsd === 'number' ? { costUsd } : {}),
   };
 }
@@ -58,6 +75,7 @@ export class ClaudeAdapter {
   private hasStreamedText = false;
   private hiddenToolUseIds = new Set<string>();
   private streamedToolUseIds = new Set<string>();
+  private lastContextTokens: number | undefined;
   private streamToolBlocks = new Map<
     number,
     {
@@ -75,6 +93,7 @@ export class ClaudeAdapter {
     this.hiddenToolUseIds.clear();
     this.streamedToolUseIds.clear();
     this.streamToolBlocks.clear();
+    this.lastContextTokens = undefined;
   }
 
   /** Map one SDKMessage to zero or more CanonicalEvents. */
@@ -232,7 +251,10 @@ export class ClaudeAdapter {
   // ── assistant ──
 
   private handleAssistant(msg: SDKMessage, events: CanonicalEvent[]): void {
-    const message = msg.message as { content?: unknown[] } | undefined;
+    const message = msg.message as { content?: unknown[]; usage?: ClaudeUsage } | undefined;
+    if (msg.parent_tool_use_id == null && message?.usage) {
+      this.lastContextTokens = totalTokens(message.usage);
+    }
     if (!message?.content) return;
 
     for (const block of message.content) {
@@ -338,7 +360,7 @@ export class ClaudeAdapter {
         kind: 'query_result',
         sessionId: msg.session_id as string,
         isError: (msg.is_error as boolean) || false,
-        usage: mapUsage(usage, msg.total_cost_usd),
+        usage: mapUsage(usage, msg.total_cost_usd, this.lastContextTokens),
         ...(denials && denials.length > 0 ? { permissionDenials: denials } : {}),
       };
       events.push(ev);
@@ -360,7 +382,7 @@ export class ClaudeAdapter {
         kind: 'query_result',
         sessionId: msg.session_id as string,
         isError: true,
-        usage: mapUsage(usage, msg.total_cost_usd),
+        usage: mapUsage(usage, msg.total_cost_usd, this.lastContextTokens),
         error: errorMsg, // Include error message in query_result
         ...(denials && denials.length > 0 ? { permissionDenials: denials } : {}),
       };

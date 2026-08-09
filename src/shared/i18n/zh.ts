@@ -291,10 +291,11 @@ export const zh: Translations = {
   'presenter.settingsUnavailable': '⚠️ 当前执行引擎不支持设置源切换',
 
   // --- cost-tracker ---
-  'cost.input': '输入',
+  'cost.input': '输入(未缓存)',
   'cost.output': '输出',
   'cost.reasoning': '推理',
-  'cost.cached': '缓存',
+  'cost.cached': '输入(已缓存)',
+  'cost.context': '当前上下文',
 
   // --- format-session-list ---
   'sessionList.stateRunning': '执行中',

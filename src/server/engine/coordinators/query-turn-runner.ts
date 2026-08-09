@@ -1,21 +1,21 @@
-import type { InboundMessage } from '../../channels/types.js';
-import { withInboundReplyContext } from '../../channels/reply-context.js';
+import type { AgentSettingSource } from '../../../shared/config.js';
+import { truncate } from '../../../shared/core/string.js';
+import type { StreamChatResult } from '../../../shared/providers/base.js';
+import type { AgentProviderRegistry } from '../../../shared/providers/registry.js';
 import { conversationScopeId } from '../../channels/conversation-context.js';
 import { deliveryRouteFromInbound } from '../../channels/delivery-route.js';
-import { truncate } from '../../../shared/core/string.js';
-import type { AgentSettingSource } from '../../../shared/config.js';
+import { withInboundReplyContext } from '../../channels/reply-context.js';
+import type { InboundMessage } from '../../channels/types.js';
+import { deliverLocalFile } from '../../services/file-delivery.js';
 import type { BridgeStore } from '../../store/interface.js';
 import type { ConversationEngine } from '../conversation-engine.js';
 import { preparePromptWithFileAttachments } from '../conversation-engine.js';
-import type { StreamChatResult } from '../../../shared/providers/base.js';
-import type { AgentProviderRegistry } from '../../../shared/providers/registry.js';
-import type { SessionStateManager } from '../state/session-state.js';
-import { SessionStaleError, isStaleSessionError } from '../state/session-stale-error.js';
-import type { SDKEngine } from '../sdk/engine.js';
-import type { QueryContext } from './query-context.js';
 import { CostTracker } from '../cost-tracker.js';
 import { MediaDirectiveParser } from '../messages/media-directive-parser.js';
-import { deliverLocalFile } from '../../services/file-delivery.js';
+import type { SDKEngine } from '../sdk/engine.js';
+import { isStaleSessionError, SessionStaleError } from '../state/session-stale-error.js';
+import type { SessionStateManager } from '../state/session-state.js';
+import type { QueryContext } from './query-context.js';
 
 const DEBUG_EVENTS = process.env.TL_DEBUG_EVENTS === '1';
 const FILE_DELIVERY_PROMPT_KEY = 'file-delivery-v2';
@@ -233,6 +233,7 @@ export class QueryTurnRunner {
             output_tokens: event.usage.outputTokens,
             cached_input_tokens: event.usage.cachedInputTokens,
             reasoning_output_tokens: event.usage.reasoningOutputTokens,
+            context_tokens: event.usage.contextTokens,
             cost_usd: event.usage.costUsd,
           });
           renderer.setUsageSummary(CostTracker.format(usageStats));

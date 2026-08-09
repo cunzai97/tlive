@@ -301,6 +301,7 @@ export interface Translations {
   'cost.output': string;
   'cost.reasoning': string;
   'cost.cached': string;
+  'cost.context': string;
 
   // --- format-session-list ---
   'sessionList.stateRunning': string;
