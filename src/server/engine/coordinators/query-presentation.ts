@@ -52,7 +52,6 @@ export class QueryPresentationFactory {
     const presenter = new QueryExecutionPresenter({
       adapter,
       inbound: msg,
-      platformLimit: FEISHU_MESSAGE_LIMIT,
       clearTyping: () => typing.stop(),
       getMessageId: getProgressMessageId,
       sessionKey,

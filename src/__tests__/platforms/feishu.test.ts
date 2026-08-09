@@ -4,6 +4,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 const mockMessageCreate = vi.fn();
 const mockMessageReply = vi.fn();
 const mockMessagePatch = vi.fn().mockResolvedValue({});
+const mockMessageDelete = vi.fn().mockResolvedValue({});
 const mockPinCreate = vi.fn().mockResolvedValue({});
 const mockImageCreate = vi.fn();
 const mockFileCreate = vi.fn();
@@ -24,6 +25,7 @@ vi.mock('@larksuiteoapi/node-sdk', () => {
         create: mockMessageCreate,
         reply: mockMessageReply,
         patch: mockMessagePatch,
+        delete: mockMessageDelete,
       },
       pin: {
         create: mockPinCreate,
@@ -104,6 +106,7 @@ describe('FeishuAdapter', () => {
     mockMessageCreate.mockResolvedValue({ data: { message_id: 'msg-feishu-1' } });
     mockMessageReply.mockResolvedValue({ data: { message_id: 'msg-feishu-reply-1' } });
     mockMessagePatch.mockResolvedValue({});
+    mockMessageDelete.mockResolvedValue({});
     mockPinCreate.mockResolvedValue({});
     mockImageCreate.mockResolvedValue({ image_key: 'img-uploaded' });
     mockFileCreate.mockResolvedValue({ file_key: 'file-uploaded' });
@@ -283,13 +286,17 @@ describe('FeishuAdapter', () => {
       const content = Array.from({ length: 9 }, (_, i) =>
         markdownTable(`Table${i + 1}Row`, 1),
       ).join('\n\n');
+      mockMessageCreate
+        .mockResolvedValueOnce({ data: { message_id: 'summary-root' } })
+        .mockResolvedValueOnce({ data: { message_id: 'summary-overflow' } });
       await adapter.start();
 
-      await adapter.send({
+      const message = {
         chatId: 'oc_chat123',
         text: '',
         feishuElements: [{ tag: 'markdown', content }],
-      });
+      };
+      const result = await adapter.send(message);
 
       expect(mockMessageCreate).toHaveBeenCalledTimes(2);
       const cardContents = mockMessageCreate.mock.calls.map((call) => call[0].data.content);
@@ -300,6 +307,18 @@ describe('FeishuAdapter', () => {
         .flatMap((cardContent) => markdownContents(JSON.parse(cardContent)))
         .join('\n');
       for (let i = 1; i <= 9; i++) expect(delivered).toContain(`Table${i}Row1`);
+
+      await adapter.editMessage('oc_chat123', result.messageId, message);
+
+      expect(mockMessageCreate).toHaveBeenCalledTimes(2);
+      expect(mockMessagePatch).toHaveBeenCalledWith({
+        path: { message_id: 'summary-root' },
+        data: { content: expect.any(String) },
+      });
+      expect(mockMessagePatch).toHaveBeenCalledWith({
+        path: { message_id: 'summary-overflow' },
+        data: { content: expect.any(String) },
+      });
       await adapter.stop();
     });
 
@@ -558,6 +577,29 @@ describe('FeishuAdapter', () => {
   });
 
   describe('editMessage()', () => {
+    it('updates existing overflow bubbles instead of recreating them on every stream flush', async () => {
+      mockMessageCreate
+        .mockResolvedValueOnce({ data: { message_id: 'overflow-1' } })
+        .mockResolvedValueOnce({ data: { message_id: 'overflow-2' } });
+      const message = { chatId: 'oc_chat123', text: 'stream '.repeat(5000) };
+      await adapter.start();
+
+      await adapter.editMessage('oc_chat123', 'stream-root', message);
+      await adapter.editMessage('oc_chat123', 'stream-root', message);
+
+      expect(mockMessageCreate).toHaveBeenCalledTimes(2);
+      expect(mockMessagePatch).toHaveBeenCalledTimes(4);
+      expect(mockMessagePatch).toHaveBeenCalledWith({
+        path: { message_id: 'overflow-1' },
+        data: { content: expect.any(String) },
+      });
+      expect(mockMessagePatch).toHaveBeenCalledWith({
+        path: { message_id: 'overflow-2' },
+        data: { content: expect.any(String) },
+      });
+      await adapter.stop();
+    });
+
     it('propagates edit failures so the renderer can fall back to a new bubble', async () => {
       await adapter.start();
       mockMessagePatch.mockRejectedValueOnce(new Error('Request failed with status code 400'));

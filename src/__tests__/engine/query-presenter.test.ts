@@ -77,7 +77,6 @@ describe('QueryExecutionPresenter', () => {
       presenter: new QueryExecutionPresenter({
         adapter: adapter as any,
         inbound: inbound as any,
-        platformLimit: 20_000,
         clearTyping: vi.fn(),
         getMessageId: overrides.getMessageId ?? (() => undefined),
         sessionKey: 'feishu:chat-1#thread:thread-1:session-1',

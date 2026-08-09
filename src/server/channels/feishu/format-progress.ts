@@ -254,7 +254,15 @@ export function buildProgressTimelineElements(params: FormatProgressParams): Fei
       if (budget <= 0 && picked.length > 0) break;
       const operation = visibleOperations[i];
       const isLatest = picked.length === 0;
-      const maxPerOperation = isLatest ? (isDone ? 1800 : 2800) : isDone ? 1200 : 1800;
+      const maxPerOperation = isLatest
+        ? isDone
+          ? 1800
+          : operation.toolEntries.length === 0
+            ? 5500
+            : 2800
+        : isDone
+          ? 1200
+          : 1800;
       const reservedBudget = isLatest && !isDone ? Math.max(budget, 1800) : budget;
       const content = truncate(
         downgradeHeadings(buildOperationContent(operation, true)),

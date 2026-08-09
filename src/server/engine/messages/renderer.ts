@@ -62,6 +62,8 @@ const HIDDEN_TOOLS = new Set([
 /** Split thresholds */
 const SPLIT_TOOL_THRESHOLD = 12;
 const SPLIT_TIMELINE_THRESHOLD = 18;
+/** Keep streamed assistant text inside Feishu's visible progress-card budget. */
+const SPLIT_RESPONSE_TEXT_THRESHOLD = 5000;
 /**
  * 单气泡内容大小阈值（字节数）。
  * 仅在没有 shouldSplitState adapter hook 时作为 fallback。
@@ -587,7 +589,8 @@ export class MessageRenderer {
   private shouldSplitBubble(): boolean {
     const defaultSplit =
       this.bubbleToolCount >= SPLIT_TOOL_THRESHOLD ||
-      this.bubbleTimelineCount >= SPLIT_TIMELINE_THRESHOLD;
+      this.bubbleTimelineCount >= SPLIT_TIMELINE_THRESHOLD ||
+      this.responseText.length >= SPLIT_RESPONSE_TEXT_THRESHOLD;
 
     // 基于实际卡片 JSON 字节数的 split（精确，优先使用）。
     // 估算的文本字节数仅在没有 adapter hook 时作为 fallback。

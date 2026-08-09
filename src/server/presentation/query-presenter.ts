@@ -1,7 +1,6 @@
 import type { BaseChannelAdapter } from '../channels/base.js';
 import type { InboundMessage, RenderedMessage } from '../channels/types.js';
 import type { TaskSummaryData } from '../../shared/formatting/message-types.js';
-import { chunkByParagraphBytes } from '../../shared/formatting/text-chunk.js';
 import type { MessageRendererState } from '../engine/messages/renderer.js';
 import type { TimelineEntry } from '../engine/messages/renderer-types.js';
 import { truncate } from '../../shared/core/string.js';
@@ -23,7 +22,6 @@ function castButtons(buttons?: Button[]): Button[] | undefined {
 interface QueryExecutionPresenterOptions {
   adapter: BaseChannelAdapter;
   inbound: InboundMessage;
-  platformLimit: number;
   clearTyping: () => void;
   getMessageId: () => string | undefined;
   sessionKey?: string;
@@ -33,7 +31,6 @@ interface QueryExecutionPresenterOptions {
 export class QueryExecutionPresenter {
   private adapter: BaseChannelAdapter;
   private inbound: InboundMessage;
-  private platformLimit: number;
   private clearTyping: () => void;
   private getMessageId: () => string | undefined;
   private sessionKey?: string;
@@ -43,7 +40,6 @@ export class QueryExecutionPresenter {
   constructor(options: QueryExecutionPresenterOptions) {
     this.adapter = options.adapter;
     this.inbound = options.inbound;
-    this.platformLimit = options.platformLimit;
     this.clearTyping = options.clearTyping;
     this.getMessageId = options.getMessageId;
     this.sessionKey = options.sessionKey;
@@ -121,61 +117,7 @@ export class QueryExecutionPresenter {
       return result.messageId;
     }
 
-    // 分块检查：渲染后的文本过大时降级为纯文本分块发送。
-    // 注意：shouldSplitBubble 已通过 shouldSplitState 精确检查实际卡片大小，
-    // 这里的检查是最后的兜底安全网，阈值与纯文本保持一致即可。
-    const isProgressCard = !!state;
-    const contentBytes = Buffer.byteLength(content, 'utf8');
-    const effectiveLimitBytes = this.platformLimit;
-
-    if (contentBytes > effectiveLimitBytes) {
-      const chunkByteSize = this.platformLimit;
-      const chunks = chunkByParagraphBytes(content, chunkByteSize);
-      const firstMessage = withInboundReplyContext(
-        this.adapter.formatContent(this.inbound.chatId, chunks[0]),
-        this.inbound,
-      );
-      const fallbackMessageId = await this.editExistingOrSend(firstMessage);
-      for (let i = 1; i < chunks.length; i++) {
-        await this.adapter.send(
-          withInboundReplyContext(
-            this.adapter.formatContent(this.inbound.chatId, chunks[i]),
-            this.inbound,
-          ),
-        );
-      }
-      return fallbackMessageId;
-    }
-
-    try {
-      return await this.editExistingOrSend(outMsg);
-    } catch (err: any) {
-      // 编辑/发送失败，尝试分块重试
-      const retryChunkSize = this.platformLimit;
-      if (contentBytes > retryChunkSize) {
-        console.warn(
-          `[presenter] flush failed (${isProgressCard ? 'progress' : 'plain'} card), retrying with chunked content (${contentBytes} bytes)`,
-        );
-        const chunks = chunkByParagraphBytes(content, retryChunkSize);
-        const firstMessage = withInboundReplyContext(
-          this.adapter.formatContent(this.inbound.chatId, chunks[0]),
-          this.inbound,
-        );
-        const fallbackMessageId = await this.adapter.send(firstMessage);
-        this.clearTyping();
-        if (fallbackMessageId.messageId) this.onMessageId?.(fallbackMessageId.messageId);
-        for (let i = 1; i < chunks.length; i++) {
-          await this.adapter.send(
-            withInboundReplyContext(
-              this.adapter.formatContent(this.inbound.chatId, chunks[i]),
-              this.inbound,
-            ),
-          );
-        }
-        return fallbackMessageId.messageId;
-      }
-      throw err;
-    }
+    return await this.editExistingOrSend(outMsg);
   }
 
   async dispose(): Promise<void> {}

@@ -14,9 +14,14 @@ import type { FeishuCardElement } from './card-builder.js';
 import type { FeishuRenderedMessage } from './types.js';
 import { getFeishuUploadKey } from './buffers.js';
 import { Logger } from '../../../shared/logger.js';
-import { chunkByParagraph } from '../../../shared/formatting/text-chunk.js';
+import {
+  chunkByParagraph,
+  chunkByParagraphBytes,
+} from '../../../shared/formatting/text-chunk.js';
 
 const FEISHU_PROGRESS_SPLIT_BYTES = 27 * 1024;
+const FEISHU_STRUCTURED_CHUNK_BYTES = 16 * 1024;
+const FEISHU_STRUCTURED_CARD_BYTES = 20 * 1024;
 /**
  * 单个气泡的文本内容上限（字符数）。
  * 飞书实际限制约 30KB，但进度卡片包含大量元数据（thinking、tool logs、timeline）。
@@ -32,6 +37,38 @@ interface FeishuCreateMessageResult {
 }
 
 type ClassifyError = (err: unknown) => BridgeError;
+
+interface OverflowMessageState {
+  messageIds: string[];
+}
+
+const overflowMessagesByClient = new WeakMap<object, Map<string, OverflowMessageState>>();
+const MAX_TRACKED_OVERFLOW_ROOTS = 256;
+
+function overflowMessageMap(client: Client): Map<string, OverflowMessageState> {
+  let states = overflowMessagesByClient.get(client as object);
+  if (!states) {
+    states = new Map();
+    overflowMessagesByClient.set(client as object, states);
+  }
+  return states;
+}
+
+function rememberOverflowMessages(client: Client, rootMessageId: string, messageIds: string[]): void {
+  if (!rootMessageId) return;
+  const states = overflowMessageMap(client);
+  if (messageIds.length === 0) {
+    states.delete(rootMessageId);
+    return;
+  }
+  states.delete(rootMessageId);
+  states.set(rootMessageId, { messageIds });
+  while (states.size > MAX_TRACKED_OVERFLOW_ROOTS) {
+    const oldestKey = states.keys().next().value;
+    if (!oldestKey) break;
+    states.delete(oldestKey);
+  }
+}
 
 function isMissingReplyTarget(err: unknown): boolean {
   const code = (err as any)?.code;
@@ -68,17 +105,19 @@ export async function sendFeishuMessage(
     const elementChunks = splitStructuredCardElements(
       message.feishuElements as FeishuCardElement[],
     );
-    let firstMessageId = '';
+    const messageIds: string[] = [];
     for (let i = 0; i < elementChunks.length; i++) {
       try {
         const chunkMessage = { ...message, feishuElements: elementChunks[i] };
         const cardContent = buildStructuredCardForMessage(chunkMessage);
         const result = await sendMessageContent(client, chunkMessage, 'interactive', cardContent);
-        if (i === 0) firstMessageId = String(result?.data?.message_id ?? '');
+        messageIds.push(String(result?.data?.message_id ?? ''));
       } catch (err) {
         throw classifyError(err);
       }
     }
+    const firstMessageId = messageIds[0] ?? '';
+    rememberOverflowMessages(client, firstMessageId, messageIds.slice(1).filter(Boolean));
     return { messageId: firstMessageId, success: true };
   }
 
@@ -104,11 +143,20 @@ export async function sendFeishuMessage(
     }
   }
 
-  const firstMessageId = await sendSingleFeishuMessage(client, message, allChunks[0], classifyError);
+  const firstMessageId = await sendSingleFeishuMessage(
+    client,
+    message,
+    allChunks[0],
+    classifyError,
+  );
+  const overflowMessageIds: string[] = [];
   for (let i = 1; i < allChunks.length; i++) {
     const hint = `**气泡 ${i + 1}/${allChunks.length}**\n`;
-    await sendSingleFeishuMessage(client, message, hint + allChunks[i], classifyError);
+    overflowMessageIds.push(
+      await sendSingleFeishuMessage(client, message, hint + allChunks[i], classifyError),
+    );
   }
+  rememberOverflowMessages(client, firstMessageId, overflowMessageIds.filter(Boolean));
   return { messageId: firstMessageId, success: true };
 }
 
@@ -140,26 +188,10 @@ export async function editFeishuMessage(
     const elementChunks = splitStructuredCardElements(
       message.feishuElements as FeishuCardElement[],
     );
-    try {
-      const firstMessage = { ...message, feishuElements: elementChunks[0] };
-      await client.im.message.patch({
-        path: { message_id: messageId },
-        data: { content: buildStructuredCardForMessage(firstMessage) },
-      });
-      for (let i = 1; i < elementChunks.length; i++) {
-        const chunkMessage = { ...message, feishuElements: elementChunks[i] };
-        await sendMessageContent(
-          client,
-          chunkMessage,
-          'interactive',
-          buildStructuredCardForMessage(chunkMessage),
-        );
-      }
-    } catch (err: any) {
-      if (classifyError && isFeishuRateLimit(err)) throw classifyError(err);
-      console.warn(`[feishu] editMessage failed: ${err?.message ?? err}`);
-      throw classifyError ? classifyError(err) : err;
-    }
+    const cardContents = elementChunks.map((feishuElements) =>
+      buildStructuredCardForMessage({ ...message, feishuElements }),
+    );
+    await editFeishuMessageChunks(client, messageId, message, cardContents, classifyError);
     return;
   }
 
@@ -174,44 +206,60 @@ export async function editFeishuMessage(
     allChunks.push(...paraChunks);
   }
 
-  if (allChunks.length === 1) {
-    try {
-      await client.im.message.patch({
-        path: { message_id: messageId },
-        data: {
-          content: message.feishuElements
-            ? buildStructuredCardForMessage(message)
-            : buildPlainCard(allChunks[0], message.buttons, message.feishuHeader),
-        },
-      });
-    } catch (err: any) {
-      if (classifyError && isFeishuRateLimit(err)) {
-        throw classifyError(err);
-      }
-      console.warn(`[feishu] editMessage failed: ${err?.message ?? err}`);
-      throw classifyError ? classifyError(err) : err;
-    }
-    return;
-  }
-
-  await client.im.message.patch({
-    path: { message_id: messageId },
-    data: {
-      content: message.feishuElements
-        ? buildStructuredCardForMessage(message)
-        : buildPlainCard(allChunks[0], message.buttons, message.feishuHeader),
-    },
+  const cardContents = allChunks.map((chunk, index) => {
+    const hint = index === 0 ? '' : `**气泡 ${index + 1}/${allChunks.length}**\n`;
+    return buildPlainCard(hint + chunk, message.buttons, message.feishuHeader);
   });
+  await editFeishuMessageChunks(client, messageId, message, cardContents, classifyError);
+}
 
-  for (let i = 1; i < allChunks.length; i++) {
-    const hint = `**气泡 ${i + 1}/${allChunks.length}**\n`;
-    const result = await sendMessageContent(
-      client,
-      { ...message, text: hint + allChunks[i] },
-      'interactive',
-      buildCardForMessage({ ...message, text: hint + allChunks[i] }, hint + allChunks[i]),
-    );
-    console.log(`[feishu] Sent chunk ${i + 1}/${allChunks.length}: ${result?.data?.message_id}`);
+async function editFeishuMessageChunks(
+  client: Client,
+  rootMessageId: string,
+  message: FeishuRenderedMessage,
+  cardContents: string[],
+  classifyError?: ClassifyError,
+): Promise<void> {
+  const states = overflowMessageMap(client);
+  const existingIds = states.get(rootMessageId)?.messageIds ?? [];
+  const nextIds: string[] = [];
+
+  try {
+    await client.im.message.patch({
+      path: { message_id: rootMessageId },
+      data: { content: cardContents[0] },
+    });
+
+    for (let i = 1; i < cardContents.length; i++) {
+      const existingId = existingIds[i - 1];
+      if (existingId) {
+        await client.im.message.patch({
+          path: { message_id: existingId },
+          data: { content: cardContents[i] },
+        });
+        nextIds.push(existingId);
+        continue;
+      }
+
+      const result = await sendMessageContent(client, message, 'interactive', cardContents[i]);
+      const createdId = String(result?.data?.message_id ?? '');
+      if (createdId) nextIds.push(createdId);
+    }
+
+    const staleIds = existingIds.slice(Math.max(0, cardContents.length - 1));
+    for (const staleId of staleIds) {
+      await client.im.message.delete({ path: { message_id: staleId } }).catch((deleteErr) => {
+        console.warn(
+          `[feishu] failed to remove stale overflow message ${staleId}: ${Logger.formatError(deleteErr)}`,
+        );
+      });
+    }
+    rememberOverflowMessages(client, rootMessageId, nextIds);
+  } catch (err: any) {
+    if (nextIds.length > 0) rememberOverflowMessages(client, rootMessageId, nextIds);
+    if (classifyError && isFeishuRateLimit(err)) throw classifyError(err);
+    console.warn(`[feishu] editMessage failed: ${err?.message ?? err}`);
+    throw classifyError ? classifyError(err) : err;
   }
 }
 
@@ -405,7 +453,9 @@ function tableCountInElement(element: FeishuCardElement): number {
 function splitElementByTableCount(element: FeishuCardElement): FeishuCardElement[] {
   if (typeof element.content === 'string') {
     const normalized = splitLargeTables(element.content);
-    const contentChunks = splitByTableCount(normalized);
+    const contentChunks = splitByTableCount(normalized).flatMap((content) =>
+      chunkByParagraphBytes(content, FEISHU_STRUCTURED_CHUNK_BYTES),
+    );
     if (contentChunks.length > 1) {
       return contentChunks.map((content) => ({ ...element, content }));
     }
@@ -445,20 +495,24 @@ function splitStructuredCardElements(elements: FeishuCardElement[]): FeishuCardE
   const chunks: FeishuCardElement[][] = [];
   let current: FeishuCardElement[] = [];
   let currentTables = 0;
+  let currentBytes = 0;
 
   for (const element of expanded) {
     const elementTables = tableCountInElement(element);
+    const elementBytes = Buffer.byteLength(JSON.stringify(element), 'utf8');
     if (
       current.length > 0 &&
-      elementTables > 0 &&
-      currentTables + elementTables > MAX_TABLES_PER_CARD
+      ((elementTables > 0 && currentTables + elementTables > MAX_TABLES_PER_CARD) ||
+        currentBytes + elementBytes > FEISHU_STRUCTURED_CARD_BYTES)
     ) {
       chunks.push(current);
       current = [];
       currentTables = 0;
+      currentBytes = 0;
     }
     current.push(element);
     currentTables += elementTables;
+    currentBytes += elementBytes;
   }
 
   if (current.length > 0) chunks.push(current);

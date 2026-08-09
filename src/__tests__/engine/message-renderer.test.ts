@@ -362,6 +362,33 @@ describe('MessageRenderer', () => {
     r.dispose();
   });
 
+  it('continues streaming long assistant text in a new bubble before completion', async () => {
+    const messageIds: string[] = [];
+    flushCallback.mockImplementation((_content: string, isEdit: boolean) => {
+      if (!isEdit) {
+        const id = `msg-${messageIds.length + 1}`;
+        messageIds.push(id);
+        return Promise.resolve(id);
+      }
+      return Promise.resolve();
+    });
+    const r = createRenderer(30_000, 300);
+
+    r.onTextDelta('a'.repeat(3000));
+    await advance(0);
+    r.onTextDelta('b'.repeat(2500));
+    await advance(300);
+
+    expect(messageIds).toEqual(['msg-1', 'msg-2']);
+
+    r.onTextDelta('streaming tail');
+    await advance(300);
+
+    expect(flushCallback.mock.calls.at(-1)?.[0]).toContain('streaming tail');
+    expect(flushCallback.mock.calls.at(-1)?.[1]).toBe(true);
+    r.dispose();
+  });
+
   it('keeps the default tool-count split even with a platform split predicate', async () => {
     const messageIds: string[] = [];
     flushCallback.mockImplementation((_content: string, isEdit: boolean) => {
