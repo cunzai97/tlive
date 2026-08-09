@@ -165,6 +165,12 @@ export class PiLiveSession implements LiveSession {
         }
       });
 
+      const modelCommand = parsePiModelCommand(prompt);
+      if (modelCommand) {
+        await this.handleModelCommand(session, modelCommand.modelPattern, context);
+        return;
+      }
+
       const prepared = this.buildPrompt(prompt, params);
       await session.prompt(prepared.prompt, {
         expandPromptTemplates: true,
@@ -223,6 +229,47 @@ export class PiLiveSession implements LiveSession {
       controller: null,
       closed: false,
     };
+  }
+
+  private async handleModelCommand(
+    session: AgentSession,
+    modelPattern: string | undefined,
+    context: PiTurnContext,
+  ): Promise<void> {
+    if (!modelPattern) throw new Error('Usage: /model <provider/model>');
+
+    const model = this.resolveModel(session.modelRegistry, modelPattern);
+    if (!model) throw new Error(`Pi model not found: ${modelPattern}`);
+
+    await session.setModel(model);
+    this.updateRuntimeInfo(session);
+    context.adapter.updateRuntime({
+      sessionId: this.sdkSessionId,
+      model: this._runtimeInfo.model,
+      reasoningEffort: this._runtimeInfo.reasoningEffort,
+    });
+    this.enqueueTurnEvent(context, {
+      kind: 'status',
+      sessionId: this.sdkSessionId ?? '',
+      ...(this._runtimeInfo.model ? { model: this._runtimeInfo.model } : {}),
+    });
+    this.enqueueTurnEvent(context, {
+      kind: 'text_delta',
+      text: `Model switched to ${model.provider}/${model.id}`,
+    });
+
+    const ctxUsage = session.getContextUsage();
+    if (ctxUsage) {
+      this.enqueueTurnEvent(context, {
+        kind: 'context_usage',
+        tokens: ctxUsage.tokens,
+        contextWindow: ctxUsage.contextWindow,
+        percent: ctxUsage.percent,
+      });
+    }
+    for (const mapped of context.adapter.mapComplete([], ctxUsage?.tokens ?? undefined)) {
+      this.enqueueTurnEvent(context, mapped);
+    }
   }
 
   private async getOrCreateSession(params?: TurnParams): Promise<AgentSession> {
@@ -388,6 +435,14 @@ export class PiLiveSession implements LiveSession {
 export function toPiThinkingLevel(effort: EffortLevel | undefined): PiThinkingLevel | undefined {
   if (effort === 'max') return 'xhigh';
   return effort;
+}
+
+function parsePiModelCommand(prompt: string): { modelPattern?: string } | undefined {
+  const trimmed = prompt.trim();
+  if (trimmed === '/model') return {};
+  const match = /^\/model\s+(.+)$/.exec(trimmed);
+  if (!match) return undefined;
+  return { modelPattern: match[1].trim() || undefined };
 }
 
 export function piAgentDir(): string {

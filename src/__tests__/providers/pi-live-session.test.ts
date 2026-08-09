@@ -157,6 +157,109 @@ describe('PiLiveSession', () => {
     expect(session.followUp).toHaveBeenCalledWith('later');
   });
 
+  it('handles /model provider/model by switching the Pi session without prompting the LLM', async () => {
+    const currentModel = { provider: 'jdy', id: 'Kimi-K2.5' };
+    const targetModel = { provider: 'openai', id: 'gpt-5.2' };
+    const modelRegistry = {
+      getAll: vi.fn(() => [currentModel, targetModel]),
+      getAvailable: vi.fn(() => [currentModel, targetModel]),
+      find: vi.fn((provider: string, modelId: string) =>
+        provider === targetModel.provider && modelId === targetModel.id ? targetModel : undefined,
+      ),
+    };
+    const session: any = {
+      sessionFile: '/tmp/pi-session.jsonl',
+      sessionId: 'pi-session-id',
+      model: currentModel,
+      modelRegistry,
+      thinkingLevel: 'high',
+      messages: [],
+      subscribe: vi.fn(() => () => {}),
+      bindExtensions: vi.fn(),
+      prompt: vi.fn(),
+      setModel: vi.fn(async (model: unknown) => {
+        session.model = model;
+      }),
+      steer: vi.fn(),
+      followUp: vi.fn(),
+      abort: vi.fn(),
+      dispose: vi.fn(),
+      getContextUsage: vi.fn(() => ({
+        tokens: 1234,
+        contextWindow: 256000,
+        percent: (1234 / 256000) * 100,
+      })),
+    };
+    piSdkMocks.createAgentSession.mockResolvedValue({ session });
+
+    const live = new PiLiveSession({ workingDirectory: '/repo' });
+    const events = await collect(live.startTurn('/model openai/gpt-5.2').stream);
+
+    expect(modelRegistry.find).toHaveBeenCalledWith('openai', 'gpt-5.2');
+    expect(session.setModel).toHaveBeenCalledWith(targetModel);
+    expect(session.prompt).not.toHaveBeenCalled();
+    expect(live.runtimeInfo.model).toBe('openai/gpt-5.2');
+    expect(events).toEqual([
+      {
+        kind: 'status',
+        sessionId: '/tmp/pi-session.jsonl',
+        model: 'jdy/Kimi-K2.5',
+      },
+      {
+        kind: 'status',
+        sessionId: '/tmp/pi-session.jsonl',
+        model: 'openai/gpt-5.2',
+      },
+      { kind: 'text_delta', text: 'Model switched to openai/gpt-5.2' },
+      {
+        kind: 'context_usage',
+        tokens: 1234,
+        contextWindow: 256000,
+        percent: (1234 / 256000) * 100,
+      },
+      {
+        kind: 'query_result',
+        sessionId: '/tmp/pi-session.jsonl',
+        isError: false,
+        usage: { inputTokens: 0, outputTokens: 0, contextTokens: 1234 },
+      },
+    ]);
+  });
+
+  it('rejects /model without a provider/model argument instead of prompting the LLM', async () => {
+    const session = {
+      sessionFile: '/tmp/pi-session.jsonl',
+      sessionId: 'pi-session-id',
+      model: { provider: 'jdy', id: 'Kimi-K2.5' },
+      modelRegistry: { getAll: () => [], getAvailable: () => [], find: vi.fn() },
+      thinkingLevel: 'high',
+      messages: [],
+      subscribe: vi.fn(() => () => {}),
+      bindExtensions: vi.fn(),
+      prompt: vi.fn(),
+      setModel: vi.fn(),
+      steer: vi.fn(),
+      followUp: vi.fn(),
+      abort: vi.fn(),
+      dispose: vi.fn(),
+      getContextUsage: vi.fn(),
+    };
+    piSdkMocks.createAgentSession.mockResolvedValue({ session });
+
+    const live = new PiLiveSession({ workingDirectory: '/repo' });
+    const events = await collect(live.startTurn('/model').stream);
+
+    expect(session.setModel).not.toHaveBeenCalled();
+    expect(session.prompt).not.toHaveBeenCalled();
+    expect(events.at(-1)).toEqual({
+      kind: 'query_result',
+      sessionId: '/tmp/pi-session.jsonl',
+      isError: true,
+      usage: { inputTokens: 0, outputTokens: 0 },
+      error: 'Usage: /model <provider/model>',
+    });
+  });
+
   it('uses TL_PI_PROVIDER to select a provider model when no explicit model is set', async () => {
     const anthropicModel = { provider: 'anthropic', id: 'claude-sonnet-4-5' };
     piSdkMocks.modelRegistryCreate.mockReturnValue({
