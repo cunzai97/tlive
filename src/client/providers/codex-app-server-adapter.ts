@@ -16,6 +16,7 @@ export class CodexAppServerAdapter {
   private readonly completedTools = new Set<string>();
   private usage: TokenUsage | undefined;
   private terminalEmitted = false;
+  private retryCount = 0;
 
   constructor(private readonly options: { sessionId?: string; model?: string } = {}) {
     this.sessionId = options.sessionId;
@@ -86,12 +87,26 @@ export class CodexAppServerAdapter {
         break;
       case 'warning':
       case 'configWarning':
-        // Warnings are advisory and must not terminate the active turn. The canonical event
-        // protocol currently has no warning event, so leave them out of the event stream.
+        events.push({
+          kind: 'warning',
+          message: stringField(params, 'message') || stringField(params, 'summary') || 'Codex warning',
+        });
         break;
       case 'error': {
         const error = recordField(params, 'error');
-        events.push({ kind: 'error', message: stringField(error, 'message') || 'Codex error' });
+        const message = stringField(error, 'message') || 'Codex error';
+        if (params.willRetry === true) {
+          // The app-server exposes willRetry, but not its retry limit or delay.
+          events.push({
+            kind: 'api_retry',
+            attempt: ++this.retryCount,
+            maxRetries: 0,
+            retryDelayMs: 0,
+            error: message,
+          });
+        } else {
+          events.push({ kind: 'error', message });
+        }
         break;
       }
       case 'turn/completed':

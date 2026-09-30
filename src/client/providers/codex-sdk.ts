@@ -15,6 +15,7 @@ export class CodexSDKProvider implements AgentProvider {
     runtimeMode: 'interactive',
     nativeSteer: true,
     nativeQueue: false,
+    drainsQueueWhenIdle: false,
     interactivePermissions: false,
     askUserQuestion: false,
     deferredTools: false,

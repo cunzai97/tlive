@@ -17,6 +17,7 @@ import type {
   StreamChatResult,
   TurnParams,
 } from '../../shared/providers/base.js';
+import { NoActiveTurnError } from '../../shared/providers/errors.js';
 import { preparePromptWithImages } from './prompt-media.js';
 import { readCodexContextUsage } from './session-scanner.js';
 import { existsSync, readFileSync } from 'node:fs';
@@ -52,7 +53,7 @@ type CodexAppServerInput =
   | { type: 'localImage'; path: string };
 
 export class CodexLiveSession implements LiveSession {
-  readonly capabilities = { nativeSteer: true, nativeQueue: false };
+  readonly capabilities = { nativeSteer: true, nativeQueue: false, drainsQueueWhenIdle: false };
   readonly runtimeInfo: AgentRuntimeInfo;
 
   private readonly client: CodexAppServerClient;
@@ -135,11 +136,11 @@ export class CodexLiveSession implements LiveSession {
     if (priority !== 'now') throw new Error('Codex provider does not support native queueing');
     const context = this.activeTurn;
     if (!this._isAlive || !context || context.closed) {
-      throw new Error('Codex session has no active turn');
+      throw new NoActiveTurnError('Codex session has no active turn');
     }
     const ready = await context.turnReady;
     if (!ready || context.closed || this.activeTurn?.token !== context.token) {
-      throw new Error('Codex turn completed before it could be steered');
+      throw new NoActiveTurnError('Codex turn completed before it could be steered');
     }
     await this.client.request('turn/steer', {
       threadId: ready.threadId,

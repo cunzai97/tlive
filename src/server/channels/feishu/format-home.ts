@@ -322,10 +322,22 @@ function homeAction(
   return actionCallback(name, ...args, homeInstanceActionArg(data?.home?.instanceId));
 }
 
-function panelNavButtons(view: HomeView, data: Pick<HomeData, 'home'>): FeishuCardElement[] {
+function panelNavButtons(
+  view: HomeView,
+  data: Pick<HomeData, 'home' | 'workspace'>,
+): FeishuCardElement[] {
+  // Refreshing the directory panel must not silently jump back to the first page.
+  const page = view === 'files' ? data.workspace.directory?.page : undefined;
   return buttonElements([
     { label: '返回', callbackData: homeAction(data, 'home-view', 'main'), row: 0 },
-    { label: '刷新', callbackData: homeAction(data, 'home-refresh', view), row: 0 },
+    {
+      label: '刷新',
+      callbackData:
+        page === undefined
+          ? homeAction(data, 'home-refresh', view)
+          : homeAction(data, 'home-refresh', view, String(page)),
+      row: 0,
+    },
   ]);
 }
 

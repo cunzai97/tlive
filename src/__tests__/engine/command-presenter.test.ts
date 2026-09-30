@@ -296,6 +296,7 @@ describe('command presenter', () => {
       expect(rendered).toContain('上一页');
       expect(rendered).toContain('第 2 / 2 页');
       expect(rendered).not.toContain('📁 folder-0');
+      expect(rendered).toContain('action:home-refresh:files:1');
     });
 
     it('keeps Feishu home card under the platform element limit', () => {

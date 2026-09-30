@@ -1,6 +1,6 @@
 import type { AgentSettingSource } from '../../../shared/config.js';
 import { truncate } from '../../../shared/core/string.js';
-import type { StreamChatResult } from '../../../shared/providers/base.js';
+import type { QueryControls, StreamChatResult } from '../../../shared/providers/base.js';
 import type { AgentProviderRegistry } from '../../../shared/providers/registry.js';
 import { conversationScopeId } from '../../channels/conversation-context.js';
 import { deliveryRouteFromInbound } from '../../channels/delivery-route.js';
@@ -60,9 +60,11 @@ export class QueryTurnRunner {
     const settingSources = query.getSettingSources(this.options.defaultAgentSettingSources);
     const scopeId = conversationScopeId(msg);
     const chatKey = this.options.state.stateKey(msg.channelType, scopeId);
-    const imageAttachments = msg.attachments?.filter((a) => a.type === 'image');
     const provider = this.options.providers.require(binding.provider);
+    // Persists every attachment and stamps `localPath` onto it, so the provider leg below
+    // hands the agent the same file the prompt refers to instead of a second copy.
     const basePromptText = preparePromptWithFileAttachments(msg.text, msg.attachments);
+    const imageAttachments = msg.attachments?.filter((a) => a.type === 'image');
     // Don't prepend file delivery context for slash commands - let the agent handle them
     const promptText = basePromptText.startsWith('/')
       ? basePromptText
@@ -141,6 +143,7 @@ export class QueryTurnRunner {
       });
     }
 
+    let registeredControls: QueryControls | undefined;
     try {
       await this.options.engine.processMessage({
         provider,
@@ -154,7 +157,10 @@ export class QueryTurnRunner {
         sdkPermissionHandler: streamResult ? undefined : sdkPermissionHandler,
         sdkAskQuestionHandler: streamResult ? undefined : sdkAskQuestionHandler,
         sdkDeferredToolHandler: streamResult ? undefined : sdkDeferredToolHandler,
-        onControls: (ctrl) => this.options.sdkEngine.setControlsForChat(chatKey, ctrl, sessionKey),
+        onControls: (ctrl) => {
+          registeredControls = ctrl;
+          this.options.sdkEngine.setControlsForChat(chatKey, ctrl, sessionKey);
+        },
         onSdkSessionId: async (id) => {
           binding.sdkSessionId = id;
           this.options.sdkEngine.updateSessionSdkSessionId?.(sessionKey, id);
@@ -202,9 +208,15 @@ export class QueryTurnRunner {
         },
         onCompactBoundary: (data) => {
           console.log(
-            `[bridge] compact_boundary: trigger=${data.trigger}${data.preTokens ? ` pre_tokens=${data.preTokens}` : ''}`,
+            `[bridge] compact_boundary: trigger=${data.trigger} phase=${data.phase ?? 'boundary'}${data.preTokens ? ` pre_tokens=${data.preTokens}` : ''}${data.errorMessage ? ` error=${data.errorMessage}` : ''}`,
           );
-          renderer.onCompacting(true);
+          // Pi reports both phases, so the indicator clears when compaction ends.
+          // A bare boundary (Claude) means the summary already exists, so it never
+          // latches the "compacting" flag on.
+          renderer.onCompacting(data.phase === 'start');
+          if (data.errorMessage) {
+            renderer.onTextDelta(`\n⚠️ 上下文压缩失败：${data.errorMessage}\n`);
+          }
         },
         onContextUsage: (data) => {
           console.log(
@@ -273,7 +285,9 @@ export class QueryTurnRunner {
         onWarning: (warning) => renderer.onTextDelta(`\n⚠️ ${warning}\n`),
       });
     } finally {
-      this.options.sdkEngine.setControlsForChat(chatKey, undefined, sessionKey);
+      if (registeredControls) {
+        this.options.sdkEngine.setControlsForChat(chatKey, undefined, sessionKey, registeredControls);
+      }
     }
 
     if (!terminalEventSeen) {

@@ -38,12 +38,15 @@ interface SlowMessageDispatchOptions {
  */
 export class MessageLoopCoordinator {
   private processingAliases = new Map<string, Set<string>>();
+  private processingOwners = new Map<string, symbol>();
 
   constructor(private options: MessageLoopCoordinatorOptions) {}
 
   aliasProcessingKey(primaryKey: string, aliasKey: string): void {
     if (primaryKey === aliasKey || !this.options.state.isProcessing(primaryKey)) return;
     this.options.state.setProcessing(aliasKey, true);
+    const owner = this.processingOwners.get(primaryKey);
+    if (owner) this.processingOwners.set(aliasKey, owner);
     const aliases = this.processingAliases.get(primaryKey) ?? new Set<string>();
     aliases.add(aliasKey);
     this.processingAliases.set(primaryKey, aliases);
@@ -74,31 +77,52 @@ export class MessageLoopCoordinator {
       const processingKey = await this.options.resolveProcessingKey(coalesced);
 
       if (this.options.state.isProcessing(processingKey)) {
-        await this.handleBusyChat(adapter, coalesced);
-        return;
+        const handled = await this.handleBusyChat(adapter, coalesced);
+        if (handled) return;
+        console.info(
+          `[tlive:loop] ${processingKey}: provider has no turn to inject into, starting one`,
+        );
       }
 
+      const previousOwner = this.processingOwners.get(processingKey);
+      const owner = Symbol('message-turn');
+      this.processingOwners.set(processingKey, owner);
+      for (const alias of this.processingAliases.get(processingKey) ?? []) {
+        if (this.processingOwners.get(alias) === previousOwner) {
+          this.processingOwners.set(alias, owner);
+        }
+      }
       this.options.state.setProcessing(processingKey, true);
       handleMessage(adapter, coalesced, requestId)
         .catch((err) => onError(err, requestId, coalesced))
-        .finally(() => this.clearProcessing(processingKey));
+        .finally(() => this.clearProcessing(processingKey, owner));
     } catch (err) {
       onError(err, requestId, coalesced);
     }
   }
 
-  private clearProcessing(processingKey: string): void {
+  private clearProcessing(processingKey: string, owner: symbol): void {
+    // Card/media delivery from an earlier turn may finish after the next turn starts.
+    if (this.processingOwners.get(processingKey) !== owner) return;
+    this.processingOwners.delete(processingKey);
     this.options.state.setProcessing(processingKey, false);
     const aliases = this.processingAliases.get(processingKey);
     if (!aliases) return;
     this.processingAliases.delete(processingKey);
     for (const alias of aliases) {
+      if (this.processingOwners.get(alias) !== owner) continue;
+      this.processingOwners.delete(alias);
       this.options.state.setProcessing(alias, false);
     }
   }
 
-  private async handleBusyChat(adapter: BaseChannelAdapter, msg: InboundMessage): Promise<void> {
-    if (!msg.text) return;
+  /**
+   * Try to inject a message that arrived while the chat looked busy.
+   * Returns false when the provider had no turn to receive it, meaning the
+   * caller should run the message as a fresh turn instead.
+   */
+  private async handleBusyChat(adapter: BaseChannelAdapter, msg: InboundMessage): Promise<boolean> {
+    if (!msg.text) return true;
 
     const result = await this.options.sdkEngine.sendWithContext(
       msg.channelType,
@@ -107,12 +131,15 @@ export class MessageLoopCoordinator {
       msg.replyToMessageId,
     );
 
+    if (!result.sent && result.failureReason === 'no_active_turn') return false;
+
     const feedbackText = this.formatQueueFeedback(result);
     if (feedbackText) {
       await adapter
         .send(withInboundReplyContext({ chatId: msg.chatId, text: feedbackText }, msg))
         .catch(() => {});
     }
+    return true;
   }
 
   /**
@@ -130,6 +157,12 @@ export class MessageLoopCoordinator {
         }
         if (result.failureReason === 'busy_unsupported') {
           return t('msgLoop.busyUnsupported');
+        }
+        if (result.failureReason === 'command_blocked') {
+          return t('msgLoop.steerCommandBlocked');
+        }
+        if (result.failureReason === 'control_timeout') {
+          return t('msgLoop.insertTimeout');
         }
         return t('msgLoop.noActiveSession');
       }
