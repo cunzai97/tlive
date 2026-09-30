@@ -351,6 +351,7 @@ export interface ErrorData {
 
 /** Progress update (for streaming) */
 export interface ProgressData {
+  turnId?: string;
   phase: 'starting' | 'executing' | 'waiting_permission' | 'completed' | 'failed';
   taskSummary: string;
   elapsedSeconds: number;
@@ -366,14 +367,29 @@ export interface ProgressData {
   /** Accumulated thinking/reasoning text */
   thinkingText?: string;
   /** Tool call history with input/result details */
-  toolLogs?: Array<{ name: string; input: string; result?: string; isError?: boolean }>;
+  toolLogs?: Array<{
+    name: string;
+    input: string;
+    toolId?: string;
+    inputData?: Record<string, unknown>;
+    status?: 'running' | 'completed' | 'failed' | 'interrupted';
+    result?: string;
+    isError?: boolean;
+  }>;
   /** Ordered interleaved timeline of thinking, text, and tool calls */
   timeline?: Array<{
     kind: 'thinking' | 'text' | 'tool';
+    blockId?: string;
     text?: string;
     toolName?: string;
     toolInput?: string;
     toolResult?: string;
+    toolId?: string;
+    inputData?: Record<string, unknown>;
+    status?: 'running' | 'completed' | 'failed' | 'interrupted';
+    detailId?: string;
+    /** Exact count from the provider tokenizer, when available. */
+    tokenCount?: number;
     isError?: boolean;
   }>;
   /** Completed Feishu flow: keep only trace panels in the progress bubble. */

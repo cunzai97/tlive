@@ -3,7 +3,6 @@ import type { InboundMessage, RenderedMessage } from '../channels/types.js';
 import type { TaskSummaryData } from '../../shared/formatting/message-types.js';
 import type { MessageRendererState } from '../engine/messages/renderer.js';
 import type { TimelineEntry } from '../engine/messages/renderer-types.js';
-import { truncate } from '../../shared/core/string.js';
 import { buildProgressData } from '../engine/messages/progress-builder.js';
 import type { Button } from '../../shared/ui/types.js';
 import { t } from '../../shared/i18n/index.js';
@@ -82,7 +81,7 @@ export class QueryExecutionPresenter {
             completedTraceOnly: true,
           },
         });
-        const traceOutMsg = withInboundReplyContext(traceMsg, this.inbound);
+        const traceOutMsg = { ...withInboundReplyContext(traceMsg, this.inbound), flowDetailUserId: this.inbound.userId, deliveryId: state.turnId };
         if (isEdit) {
           await this.editExistingOrSend(traceOutMsg);
         } else {
@@ -96,7 +95,7 @@ export class QueryExecutionPresenter {
           chatId: this.inbound.chatId,
           data: this.buildTaskSummary(state),
         });
-        await this.adapter.send(withInboundReplyContext(summaryMsg, this.inbound));
+        await this.adapter.send({ ...withInboundReplyContext(summaryMsg, this.inbound), deliveryId: state.turnId ? `${state.turnId}:answer` : undefined });
         return;
       }
 
@@ -108,7 +107,7 @@ export class QueryExecutionPresenter {
     } else {
       outMsg = this.adapter.formatContent(this.inbound.chatId, content, castButtons(buttons));
     }
-    outMsg = withInboundReplyContext(outMsg, this.inbound);
+    outMsg = { ...withInboundReplyContext(outMsg, this.inbound), flowDetailUserId: this.inbound.userId, deliveryId: state?.turnId };
 
     if (!isEdit) {
       const result = await this.adapter.send(outMsg);
@@ -141,10 +140,10 @@ export class QueryExecutionPresenter {
     errorMessage?: string;
     footerLine?: string;
   }): TaskSummaryData {
-    // Allow full summary for task completion (up to 5000 chars)
+    // Preserve the complete final answer; the channel owns lossless pagination.
     const locale = this.adapter.getLocale();
     const summarySource = this.finalSummarySource(state);
-    const summary = truncate(summarySource || t('format.taskCompleted'), 5000);
+    const summary = summarySource || t('format.taskCompleted');
     const changedFileKeys = new Set(
       state.toolLogs
         .filter((log) => ['Edit', 'Write', 'MultiEdit'].includes(log.name) && log.input.trim())

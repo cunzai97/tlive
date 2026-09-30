@@ -25,6 +25,7 @@ function formatContextUsage(ctx: { tokens: number | null; contextWindow: number;
 
 /** Input state for rendering */
 export interface RenderInput {
+  turnId?: string;
   phase: 'starting' | 'executing' | 'waiting_permission' | 'completed' | 'failed';
   responseText: string;
   thinkingText: string;
@@ -119,6 +120,7 @@ export class ProgressContentBuilder {
               : input.totalTools === 0 && !input.responseText && input.todoItems.length === 0
                 ? 'starting'
                 : 'executing',
+      turnId: input.turnId,
       renderedText: content,
       responseText: input.responseText,
       elapsedSeconds: input.elapsedSeconds,
@@ -313,6 +315,7 @@ export function buildProgressData(
   renderedTextOverride?: string,
 ): ProgressData {
   return {
+    turnId: state.turnId,
     phase: state.phase,
     renderedText: renderedTextOverride ?? state.renderedText,
     taskSummary,

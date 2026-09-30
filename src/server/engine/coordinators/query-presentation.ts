@@ -61,6 +61,7 @@ export class QueryPresentationFactory {
       // FeishuSender owns the combined byte/table split and its message-id topology.
       // Supplying a predicate disables MessageRenderer's generic size-estimation fallback.
       shouldSplitState: () => false,
+      channelOwnsPagination: adapter.channelType === 'feishu',
       platformLimit: FEISHU_MESSAGE_LIMIT,
       throttleMs: 300,
       adaptiveFlush: {

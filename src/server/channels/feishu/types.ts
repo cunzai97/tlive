@@ -24,6 +24,10 @@ export interface FeishuRenderedMessage {
   threadId?: string;
   /** Use message.reply with reply_in_thread when replying. */
   replyInThread?: boolean;
+  /** Stable identity of a logical send across partial-delivery retries. */
+  deliveryId?: string;
+  /** Authorized original requester for file-detail buttons. */
+  flowDetailUserId?: string;
   /** Media attachment */
   media?: import('../../../shared/media/attachments.js').MediaAttachment;
 }

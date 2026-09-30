@@ -1,13 +1,14 @@
 import type { Button } from '../../../shared/ui/types.js';
 import { buildFeishuButtonElements, type FeishuCardElement } from './card-builder.js';
 import { downgradeHeadings, splitLargeTables } from './markdown.js';
+import { redactSensitiveContent } from '../../../shared/utils/content-filter.js';
 
 export interface CollapsiblePanelOptions {
   expanded?: boolean;
 }
 
 export function markdownElement(content: string): FeishuCardElement {
-  return { tag: 'markdown', content: downgradeHeadings(splitLargeTables(content)) };
+  return { tag: 'markdown', content: downgradeHeadings(splitLargeTables(redactSensitiveContent(content))) };
 }
 
 export function buttonElements(buttons?: Button[]): FeishuCardElement[] {

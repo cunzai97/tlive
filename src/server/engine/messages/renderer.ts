@@ -3,6 +3,8 @@
  * Rendering logic delegated to ProgressContentBuilder.
  */
 
+import { randomUUID } from 'node:crypto';
+import { redactSensitiveContent } from '../../../shared/utils/content-filter.js';
 import { truncate } from '../../../shared/core/string.js';
 import type { TodoStatus } from '../../../shared/canonical/schema.js';
 import type { VerboseLevel } from '../state/session-state.js';
@@ -25,6 +27,8 @@ export type { ToolLogEntry, TimelineEntry, MessageRendererState } from './render
 
 export interface MessageRendererOptions {
   shouldSplitState?: (state: MessageRendererState) => boolean;
+  /** The channel owns lossless card pagination; retain the full turn state. */
+  channelOwnsPagination?: boolean;
   platformLimit: number;
   throttleMs?: number;
   adaptiveFlush?: boolean | AdaptiveFlushOptions;
@@ -88,6 +92,9 @@ export class MessageRenderer {
   private toolIdToLogIndex = new Map<string, number>();
   private timeline: TimelineEntry[] = [];
   private toolIdToTimelineIndex = new Map<string, number>();
+  private pendingToolResults = new Map<string, { content: string; isError: boolean }>();
+  private readonly turnId = randomUUID();
+  private readonly channelOwnsPagination: boolean;
   private lastTimelineIsText = false;
   private splitPending = false;
   private sessionInfo?: {
@@ -142,6 +149,7 @@ export class MessageRenderer {
 
   constructor(options: MessageRendererOptions) {
     this.shouldSplitState = options.shouldSplitState;
+    this.channelOwnsPagination = options.channelOwnsPagination ?? false;
     this.platformLimit = options.platformLimit;
     this.throttleMs = options.throttleMs ?? 300;
     this.flushCallback = options.flushCallback;
@@ -172,13 +180,14 @@ export class MessageRenderer {
   }
 
   onThinkingDelta(text: string): void {
+    if (this.completed || this.errorMessage) return;
     this.thinkingText += text;
     const last = this.timeline[this.timeline.length - 1];
     if (last?.kind === 'thinking') {
       last.text = (last.text || '') + text;
     } else {
       this.bubbleTimelineCount++;
-      this.timeline.push({ kind: 'thinking', text });
+      this.timeline.push({ kind: 'thinking', text, blockId: `${this.turnId}_${this.timeline.length}` });
     }
     this.lastTimelineIsText = false;
     this.updateSplitPending();
@@ -187,25 +196,36 @@ export class MessageRenderer {
   }
 
   onToolStart(name: string, input?: Record<string, unknown>, toolUseId?: string): void {
-    if (HIDDEN_TOOLS.has(name)) return;
+    if (HIDDEN_TOOLS.has(name) || this.completed || this.errorMessage) return;
+    if (toolUseId && this.toolIdToTimelineIndex.has(toolUseId)) return;
     this.onApiRetryCleared();
     const current = this.toolCounts.get(name) ?? 0;
     this.toolCounts.set(name, current + 1);
     this.totalTools++;
     this.bubbleToolCount++;
 
-    const formattedInput = formatToolInput(name, input);
-    this.currentTool = { name, input: formattedInput, elapsed: 0 };
+    const toolId = toolUseId || `${this.turnId}_${this.totalTools}`;
+    const inputData = input ? clonePresentationInput(input) : undefined;
+    const formattedInput = redactSensitiveContent(formatToolInput(name, inputData));
+    this.currentTool = { name, input: formattedInput, elapsed: 0, toolId };
 
     const logIndex = this.toolLogs.length;
-    this.toolLogs.push({ name, input: formattedInput });
-    if (toolUseId) this.toolIdToLogIndex.set(toolUseId, logIndex);
+    this.toolLogs.push({ name, input: formattedInput, toolId, inputData, status: 'running' });
+    this.toolIdToLogIndex.set(toolId, logIndex);
 
     const tlIdx = this.timeline.length;
     this.bubbleTimelineCount++;
-    this.timeline.push({ kind: 'tool', toolName: name, toolInput: formattedInput });
-    if (toolUseId) this.toolIdToTimelineIndex.set(toolUseId, tlIdx);
+    this.timeline.push({
+      kind: 'tool', toolName: name, toolInput: formattedInput,
+      toolId, inputData, status: 'running',
+    });
+    this.toolIdToTimelineIndex.set(toolId, tlIdx);
     this.lastTimelineIsText = false;
+    const earlyResult = this.pendingToolResults.get(toolId);
+    if (earlyResult) {
+      this.pendingToolResults.delete(toolId);
+      this.onToolResult(toolId, earlyResult.content, earlyResult.isError);
+    }
 
     if (!this.elapsedTimer) {
       this.elapsedTimer = setInterval(() => {
@@ -275,23 +295,48 @@ export class MessageRenderer {
     this.contextUsage = data;
   }
 
-  onToolComplete(_toolUseId: string): void {
-    this.currentTool = null;
+  onToolComplete(toolUseId: string): void {
+    const tlIdx = this.toolIdToTimelineIndex.get(toolUseId);
+    const logIdx = this.toolIdToLogIndex.get(toolUseId);
+    const entry = tlIdx === undefined ? undefined : this.timeline[tlIdx];
+    const log = logIdx === undefined ? undefined : this.toolLogs[logIdx];
+    if (entry?.status === 'running') entry.status = 'completed';
+    if (log?.status === 'running') log.status = 'completed';
+    if (this.currentTool?.toolId === toolUseId) this.currentTool = null;
+    if (!this.completed && !this.errorMessage) {
+      this.forceFlush = true;
+      this.scheduleFlush();
+    }
   }
 
   onToolResult(toolUseId: string, content: string, isError: boolean): void {
-    const logIndex = this.toolIdToLogIndex.get(toolUseId);
-    if (logIndex !== undefined && logIndex < this.toolLogs.length) {
-      const preview = isError ? `❌ ${truncate(content, 200)}` : truncate(content, 200);
-      this.toolLogs[logIndex].result = preview;
-      this.toolLogs[logIndex].isError = isError;
-    }
     const tlIdx = this.toolIdToTimelineIndex.get(toolUseId);
-    if (tlIdx !== undefined && tlIdx < this.timeline.length) {
-      const entry = this.timeline[tlIdx];
-      entry.toolResult = isError ? `❌ ${truncate(content, 200)}` : truncate(content, 200);
-      entry.isError = isError;
+    if (tlIdx === undefined) {
+      if (this.completed || this.errorMessage) return;
+      if (this.pendingToolResults.size >= 256) {
+        const first = this.pendingToolResults.keys().next().value;
+        if (first) this.pendingToolResults.delete(first);
+      }
+      this.pendingToolResults.set(toolUseId, { content, isError });
+      return;
     }
+    const entry = this.timeline[tlIdx];
+    if (entry.toolResult !== undefined) return;
+    const result = redactSensitiveContent(content);
+    const terminated = entry.status === 'interrupted' || (entry.status === 'failed' && !!this.errorMessage);
+    entry.toolResult = result;
+    if (!terminated) {
+      entry.isError = isError;
+      entry.status = isError ? 'failed' : 'completed';
+    }
+    const logIndex = this.toolIdToLogIndex.get(toolUseId);
+    if (logIndex !== undefined) {
+      this.toolLogs[logIndex].result = result;
+      this.toolLogs[logIndex].isError = entry.isError;
+      this.toolLogs[logIndex].status = entry.status;
+    }
+    if (this.currentTool?.toolId === toolUseId) this.currentTool = null;
+    if (this.completed || this.errorMessage) return;
     this.updateSplitPending();
     this.forceFlush = true;
     this.scheduleFlush();
@@ -314,6 +359,7 @@ export class MessageRenderer {
   }
 
   onTextDelta(text: string): void {
+    if (this.completed || this.errorMessage) return;
     this.responseText += text;
     // Any streamed content means the retry landed, so drop the indicator.
     this.onApiRetryCleared();
@@ -322,7 +368,7 @@ export class MessageRenderer {
       const last = this.timeline[this.timeline.length - 1];
       last.text = (last.text || '') + text;
     } else {
-      this.timeline.push({ kind: 'text', text });
+      this.timeline.push({ kind: 'text', text, blockId: `${this.turnId}_${this.timeline.length}` });
       this.lastTimelineIsText = true;
     }
     if (!this.taskSummary) {
@@ -356,7 +402,9 @@ export class MessageRenderer {
   }
 
   onComplete(): Promise<void> {
-    this.completed = true;
+    if (!this.errorMessage) this.completed = true;
+    this.settlePendingTools(this.errorMessage === 'Interrupted' ? 'interrupted' : 'failed');
+    this.forceFlush = true;
     this.footerLine = this.contentBuilder.buildFooter(this.getRenderInput());
     this.stopTimers();
     const content = this.contentBuilder.render(this.getRenderInput());
@@ -365,6 +413,8 @@ export class MessageRenderer {
 
   onError(error: string): Promise<void> {
     this.errorMessage = error;
+    this.settlePendingTools(error === 'Interrupted' ? 'interrupted' : 'failed');
+    this.forceFlush = true;
     this.stopTimers();
     const content = this.contentBuilder.render(this.getRenderInput());
     return this.doFlush(content);
@@ -407,6 +457,7 @@ export class MessageRenderer {
               : this.totalTools === 0 && !this.responseText && this.todoItems.length === 0
                 ? 'starting'
                 : 'executing',
+      turnId: this.turnId,
       responseText: this.responseText,
       thinkingText: this.thinkingText,
       elapsedSeconds: this.elapsedSeconds,
@@ -429,7 +480,7 @@ export class MessageRenderer {
       sessionId: this.sessionId,
       usageSummary: this.usageSummary,
       contextUsage: this.contextUsage,
-      platformLimit: this.platformLimit,
+      platformLimit: this.channelOwnsPagination ? Number.POSITIVE_INFINITY : this.platformLimit,
       sessionInfo: this.sessionInfo,
       toolUseSummaryText: this.toolUseSummaryText,
       apiRetry: this.apiRetryState,
@@ -568,6 +619,23 @@ export class MessageRenderer {
     }
   }
 
+  private settlePendingTools(status: 'failed' | 'interrupted'): void {
+    for (const entry of this.timeline) {
+      if (entry.kind === 'tool' && entry.status === 'running') {
+        entry.status = status;
+        entry.isError = status === 'failed';
+      }
+    }
+    for (const log of this.toolLogs) {
+      if (log.status === 'running') {
+        log.status = status;
+        log.isError = status === 'failed';
+      }
+    }
+    this.currentTool = null;
+    this.pendingToolResults.clear();
+  }
+
   private resetBubbleState(): void {
     this._messageId = undefined;
     this.timeline = [];
@@ -588,6 +656,7 @@ export class MessageRenderer {
   }
 
   private shouldSplitBubble(): boolean {
+    if (this.channelOwnsPagination) return false;
     const defaultSplit =
       this.bubbleToolCount >= SPLIT_TOOL_THRESHOLD ||
       this.bubbleTimelineCount >= SPLIT_TIMELINE_THRESHOLD;
@@ -608,6 +677,20 @@ export class MessageRenderer {
     }
     return defaultSplit || estimatedContentTooLarge;
   }
+}
+
+/** Clone/redact presentation data without mutating the provider's tool input. */
+function clonePresentationInput(input: Record<string, unknown>): Record<string, unknown> {
+  const visit = (value: unknown, key = ''): unknown => {
+    if (/password|secret|token|api[_-]?key|private[_-]?key/i.test(key)) return '[REDACTED]';
+    if (typeof value === 'string') return redactSensitiveContent(value);
+    if (Array.isArray(value)) return value.map((item) => visit(item));
+    if (value && typeof value === 'object') {
+      return Object.fromEntries(Object.entries(value).map(([name, item]) => [name, visit(item, name)]));
+    }
+    return value;
+  };
+  return visit(input) as Record<string, unknown>;
 }
 
 function getRateLimitRetryAfterMs(err: any): number | undefined {

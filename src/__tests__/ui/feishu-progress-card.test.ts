@@ -168,8 +168,8 @@ describe('FeishuFormatter.formatVersionUpdate', () => {
   });
 });
 
-describe('FeishuFormatter.formatProgress', () => {
-  const formatter = new FeishuFormatter('zh');
+describe('FeishuFormatter.formatProgress (explicit legacy mode)', () => {
+  const formatter = new FeishuFormatter('zh', { flowOptions: { mode: 'legacy' } });
 
   describe('completed phase — clean layout', () => {
     it('shows response text directly without task/phase/duration fields', () => {

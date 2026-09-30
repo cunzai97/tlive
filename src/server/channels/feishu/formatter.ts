@@ -68,6 +68,14 @@ import { buildHelpElements } from './format-help.js';
 import { buildDiagnoseElements } from './format-diagnostics.js';
 import { buildSessionListElements } from './format-session-list.js';
 import { buttonElements, collapsiblePanel, markdownElement } from './card-elements.js';
+import type { FlowOptions } from './flow-blocks.js';
+import { createDefaultToolDisplayRegistry } from './tool-display.js';
+import type { FeishuToolDetails } from './tool-details.js';
+
+export interface FeishuFormatterOptions extends MessageFormatterOptions {
+  flowOptions?: FlowOptions;
+  toolDetails?: FeishuToolDetails;
+}
 
 function compactReleaseNotes(notes?: string): string {
   if (!notes?.trim()) return '';
@@ -91,7 +99,7 @@ function compactReleaseNotes(notes?: string): string {
 export class FeishuFormatter implements MessageFormatter<FeishuRenderedMessage> {
   constructor(
     private readonly locale: Locale = 'zh',
-    private readonly options: MessageFormatterOptions = {},
+    private readonly options: FeishuFormatterOptions = {},
   ) {}
 
   getLocale(): Locale {
@@ -399,6 +407,20 @@ export class FeishuFormatter implements MessageFormatter<FeishuRenderedMessage> 
   }
 
   formatProgress(chatId: string, data: ProgressData): FeishuRenderedMessage {
+    if (this.options.toolDetails && this.options.flowOptions?.mode !== 'legacy' && data.timeline) {
+      const registry = this.options.flowOptions?.registry ?? createDefaultToolDisplayRegistry();
+      data = {
+        ...data,
+        timeline: data.timeline.map((entry) => {
+          if (entry.kind !== 'tool' || registry.category(entry.toolName ?? '') !== 'editing') return entry;
+          const detailId = this.options.toolDetails!.register(chatId, {
+            ...entry,
+            toolId: data.turnId && entry.toolId ? `${data.turnId}:${entry.toolId}` : entry.toolId,
+          });
+          return detailId ? { ...entry, detailId } : entry;
+        }),
+      };
+    }
     const headerConfig = progressHeaderConfig(this.locale, data);
     const elements: FeishuCardElement[] = [];
 
@@ -409,6 +431,7 @@ export class FeishuFormatter implements MessageFormatter<FeishuRenderedMessage> 
         data,
         md: this.md.bind(this),
         locale: this.locale,
+        flowOptions: this.options.flowOptions,
       }),
     );
 
@@ -419,6 +442,7 @@ export class FeishuFormatter implements MessageFormatter<FeishuRenderedMessage> 
         data,
         md: this.md.bind(this),
         locale: this.locale,
+        flowOptions: this.options.flowOptions,
       }),
     );
 

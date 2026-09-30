@@ -5,9 +5,14 @@
 import type { TodoStatus } from '../../../shared/canonical/schema.js';
 
 /** Tool call log entry for detailed display */
+export type PresentationToolStatus = 'running' | 'completed' | 'failed' | 'interrupted';
+
 export interface ToolLogEntry {
   name: string;
   input: string;
+  toolId?: string;
+  inputData?: Record<string, unknown>;
+  status?: PresentationToolStatus;
   result?: string;
   isError?: boolean;
 }
@@ -15,24 +20,33 @@ export interface ToolLogEntry {
 /** Ordered timeline entry — interleaves text output with tool calls */
 export interface TimelineEntry {
   kind: 'thinking' | 'text' | 'tool';
+  blockId?: string;
   /** For thinking/text entries */
   text?: string;
   /** For tool entries */
   toolName?: string;
   toolInput?: string;
   toolResult?: string;
+  toolId?: string;
+  inputData?: Record<string, unknown>;
+  status?: PresentationToolStatus;
+  detailId?: string;
+  /** Exact count supplied by the active provider tokenizer, when available. */
+  tokenCount?: number;
   isError?: boolean;
 }
 
 /** Current tool execution state for progress display */
 export interface CurrentTool {
   name: string;
+  toolId?: string;
   input: string; // Brief description of what's being done
   elapsed: number; // Seconds
 }
 
 /** Renderer state snapshot for progress display */
 export interface MessageRendererState {
+  turnId?: string;
   phase: 'starting' | 'executing' | 'waiting_permission' | 'completed' | 'failed';
   renderedText: string;
   responseText: string;

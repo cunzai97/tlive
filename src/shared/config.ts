@@ -4,6 +4,7 @@ import { expandTilde, getTliveHome } from './core/path.js';
 import { normalizeQuickButtonNames, type QuickButtonName } from './ui/button-registry.js';
 import { DEFAULT_AGENT_PROVIDER_KIND, type AgentProviderKind } from './providers/kinds.js';
 import type { Locale } from './i18n/index.js';
+import { readFeishuCardFlowSettings, type FeishuCardFlowSettings } from './feishu-card-config.js';
 
 export type AgentSettingSource = 'user' | 'project' | 'local';
 export type ConfigProfile = 'server' | 'client';
@@ -73,6 +74,8 @@ export interface Config {
   ui: {
     /** Buttons shown on completed/failed task cards and task summary cards. */
     doneButtons: QuickButtonName[];
+    /** Blocks by default; legacy is an immediate presentation rollback. */
+    feishuCards?: FeishuCardFlowSettings;
   };
   /** Remote client/server split configuration. */
   remote: {
@@ -401,6 +404,7 @@ export function loadConfig(options: LoadConfigOptions = {}): Config {
     },
     ui: {
       doneButtons: normalizeQuickButtonNames(get('TL_DONE_BUTTONS', 'home')),
+      feishuCards: readFeishuCardFlowSettings(get),
     },
     remote: {
       server: {

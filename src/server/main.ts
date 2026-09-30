@@ -491,6 +491,7 @@ export async function main() {
     new FeishuAdapter(config.feishu, {
       doneButtons: config.ui.doneButtons,
       autoPinTopics: config.feishu.autoPinTopics,
+      cardFlow: config.ui.feishuCards,
     }),
   );
   logger.info('Registered feishu adapter');
