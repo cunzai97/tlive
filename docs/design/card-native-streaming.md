@@ -48,9 +48,12 @@
 - 同一实际查询流程覆盖原生主卡上的编辑详情按钮和缺少话题字段的回调；详情不进入模型队列。
 - 快照、预算和平台 API 权限不等于客户端视觉验收。真实权限、移动端打字效果、手动折叠保持、真实超限边界、按钮回调时延仍需试用。
 
-## 真实权限探测与当前阻塞
+## 真实权限探测与运行切换
 
-- 用户已授权先检查权限、通过后切换。采用实际运行桥接的应用身份与本版 formatter/planner 生成的卡片，调用 CardKit 创建接口；探测没有发送到聊天。
-- 接口实际返回 `99991672`，明确缺少应用身份权限 `cardkit:card:write`。未取得 card_id，也未进行后续文本/关闭操作。
-- 权限条件未满足，所以没有停止旧桥接、没有部署流式版；当前详情修复版继续运行。
-- 本次是已验证的代码与构建交付，原生平台运行仍受权限阻塞。须由应用管理员开通并按平台要求生效后重新探测，不可把普通消息发送权限或桥接健康状态当成 CardKit 权限已具备。
+- 首次探测使用运行桥接的应用身份与本版 formatter/planner 生成的卡片，未发送到聊天；接口返回 `99991672`，缺少 `cardkit:card:write`，因此当时未停止旧桥接或部署。
+- 用户确认开通权限后重新探测：实体 `7691519108643179462` 的 `card.create`、两次 `cardElement.content`、`card.update`、`card.settings` 均返回 `code=0`，最终关闭流式。实体未发到聊天；当前 SDK 没有 CardKit 实体内容读取接口，这些是接口响应验证，不是视觉或远端内容读回验收。
+- 重建隔离工作区的产物并检查语法后，仅对核实身份的旧 bridge PID `823702` 发送 SIGTERM，再通过本工作区 CLI `start --standalone` 独立启动；原 client PID `793041` 未停止或重启。
+- 新 bridge PID `892748`，实际产物 `/home/pan/work/tlive-card-native-streaming/dist/main.mjs`；fresh status 的 readyAt 为 `2026-10-01T02:25:29.062Z`。新日志确认飞书 `ws client ready` 与同一 local 客户端重新注册。
+- 新桥接显式设置 `TL_FS_CARD_FLOW=blocks`、`TL_FS_NATIVE_STREAMING=true`，继承原运行环境但剥离代理。读取新进程环境、路径、状态与日志验证运行结果，没有打印或落盘凭据。
+- systemd 两个 unit 保持 inactive，文件哈希和默认 CLI 内容/路径均未改变；旧工作区及构建保留作为回退。运行记录：`/home/pan/.tlive/runtime/card-native-streaming-trial.json`。
+- 子代理迟到复核针对旧基线；最终树的相关 6 文件 / 80 项回归已重新通过。新版本已运行，但手机逐字效果、手动折叠保持、真实续卡和详情仍待用户用新任务验收；重启清空旧详情快照。
