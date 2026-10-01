@@ -94,6 +94,7 @@ export class MessageRenderer {
   private toolIdToTimelineIndex = new Map<string, number>();
   private pendingToolResults = new Map<string, { content: string; isError: boolean }>();
   private readonly turnId = randomUUID();
+  private nextBlockIndex = 0;
   private readonly channelOwnsPagination: boolean;
   private lastTimelineIsText = false;
   private splitPending = false;
@@ -187,7 +188,7 @@ export class MessageRenderer {
       last.text = (last.text || '') + text;
     } else {
       this.bubbleTimelineCount++;
-      this.timeline.push({ kind: 'thinking', text, blockId: `${this.turnId}_${this.timeline.length}` });
+      this.timeline.push({ kind: 'thinking', text, blockId: this.createBlockId() });
     }
     this.lastTimelineIsText = false;
     this.updateSplitPending();
@@ -216,8 +217,13 @@ export class MessageRenderer {
     const tlIdx = this.timeline.length;
     this.bubbleTimelineCount++;
     this.timeline.push({
-      kind: 'tool', toolName: name, toolInput: formattedInput,
-      toolId, inputData, status: 'running',
+      kind: 'tool',
+      toolName: name,
+      toolInput: formattedInput,
+      blockId: this.createBlockId(),
+      toolId,
+      inputData,
+      status: 'running',
     });
     this.toolIdToTimelineIndex.set(toolId, tlIdx);
     this.lastTimelineIsText = false;
@@ -291,7 +297,11 @@ export class MessageRenderer {
     this.scheduleFlush();
   }
 
-  onContextUsage(data: { tokens: number | null; contextWindow: number; percent: number | null }): void {
+  onContextUsage(data: {
+    tokens: number | null;
+    contextWindow: number;
+    percent: number | null;
+  }): void {
     this.contextUsage = data;
   }
 
@@ -323,7 +333,7 @@ export class MessageRenderer {
     const entry = this.timeline[tlIdx];
     if (entry.toolResult !== undefined) return;
     const result = redactSensitiveContent(content);
-    const terminated = entry.status === 'interrupted' || (entry.status === 'failed' && !!this.errorMessage);
+    const terminated = entry.status === 'interrupted' || entry.status === 'failed';
     entry.toolResult = result;
     if (!terminated) {
       entry.isError = isError;
@@ -368,7 +378,7 @@ export class MessageRenderer {
       const last = this.timeline[this.timeline.length - 1];
       last.text = (last.text || '') + text;
     } else {
-      this.timeline.push({ kind: 'text', text, blockId: `${this.turnId}_${this.timeline.length}` });
+      this.timeline.push({ kind: 'text', text, blockId: this.createBlockId() });
       this.lastTimelineIsText = true;
     }
     if (!this.taskSummary) {
@@ -443,6 +453,11 @@ export class MessageRenderer {
   }
 
   // --- Internal ---
+
+  private createBlockId(): string {
+    // Keep IDs unique across legacy bubble resets within the same turn.
+    return `${this.turnId}_${this.nextBlockIndex++}`;
+  }
 
   private getRenderInput(): RenderInput {
     const permissionQueue = this.permissionTracker?.getQueue() ?? [];
@@ -686,7 +701,9 @@ function clonePresentationInput(input: Record<string, unknown>): Record<string, 
     if (typeof value === 'string') return redactSensitiveContent(value);
     if (Array.isArray(value)) return value.map((item) => visit(item));
     if (value && typeof value === 'object') {
-      return Object.fromEntries(Object.entries(value).map(([name, item]) => [name, visit(item, name)]));
+      return Object.fromEntries(
+        Object.entries(value).map(([name, item]) => [name, visit(item, name)]),
+      );
     }
     return value;
   };

@@ -359,18 +359,8 @@ describe('FeishuAdapter', () => {
       await adapter.editMessage('oc_chat123', result.messageId, message);
 
       expect(mockMessageCreate).toHaveBeenCalledTimes(3);
-      expect(mockMessagePatch).toHaveBeenCalledWith({
-        path: { message_id: 'summary-root' },
-        data: { content: expect.any(String) },
-      });
-      expect(mockMessagePatch).toHaveBeenCalledWith({
-        path: { message_id: 'summary-overflow-1' },
-        data: { content: expect.any(String) },
-      });
-      expect(mockMessagePatch).toHaveBeenCalledWith({
-        path: { message_id: 'summary-overflow-2' },
-        data: { content: expect.any(String) },
-      });
+      // The exact same target is already acknowledged: no redundant patch calls.
+      expect(mockMessagePatch).not.toHaveBeenCalled();
       await adapter.stop();
     });
 
@@ -430,6 +420,7 @@ describe('FeishuAdapter', () => {
           receive_id: 'oc_chat123',
           msg_type: 'file',
           content: JSON.stringify({ file_key: 'file-uploaded' }),
+          uuid: expect.any(String),
         },
       });
       await adapter.stop();
@@ -456,6 +447,7 @@ describe('FeishuAdapter', () => {
           receive_id: 'oc_chat123',
           msg_type: 'file',
           content: JSON.stringify({ file_key: 'nested-file-key' }),
+          uuid: expect.any(String),
         },
       });
       await adapter.stop();
@@ -521,6 +513,7 @@ describe('FeishuAdapter', () => {
           receive_id: 'oc_chat123',
           msg_type: 'text',
           content: JSON.stringify({ text: 'Continue previous Claude task' }),
+          uuid: expect.any(String),
         },
       });
       expect(mockMessageReply).toHaveBeenCalledWith({
@@ -540,7 +533,7 @@ describe('FeishuAdapter', () => {
         verificationToken: 'verify_token',
         encryptKey: '',
         allowedUsers: [],
-      }, { autoPinTopics: true });
+      }, { autoPinTopics: true, botOpenId: 'ou_bot', botName: 'testbot' });
       mockMessageReply.mockResolvedValueOnce({
         data: { message_id: 'msg-topic-start', thread_id: 'thread-1' },
       });
@@ -561,7 +554,7 @@ describe('FeishuAdapter', () => {
         verificationToken: 'verify_token',
         encryptKey: '',
         allowedUsers: [],
-      }, { autoPinTopics: true });
+      }, { autoPinTopics: true, botOpenId: 'ou_bot', botName: 'testbot' });
       mockMessageReply.mockResolvedValueOnce({
         data: { message_id: 'msg-topic-metadata', thread_id: 'thread-1' },
       });
@@ -578,6 +571,7 @@ describe('FeishuAdapter', () => {
         path: { message_id: 'msg-topic-root' },
         data: {
           msg_type: 'post',
+          uuid: expect.any(String),
           content: JSON.stringify({
             zh_cn: {
               title: 'TLive 会话索引',
@@ -629,7 +623,7 @@ describe('FeishuAdapter', () => {
   });
 
   describe('editMessage()', () => {
-    it('collapses earlier chunks while keeping the latest long text chunk expanded', async () => {
+    it('keeps model text unfolded and preserves every continuation during growth', async () => {
       const remoteCards = new Map<string, string>();
       let nextMessageId = 1;
       mockMessageCreate.mockImplementation(async (call) => {
@@ -662,10 +656,9 @@ describe('FeishuAdapter', () => {
 
       let cards = [...remoteCards.values()].map((content) => JSON.parse(content));
       let panels = cards.flatMap((card) => elementsByTag(card, 'collapsible_panel'));
-      expect(panels.length).toBeGreaterThan(1);
-      expect(panels.slice(0, -1).every((panel) => panel.expanded === false)).toBe(true);
-      expect(panels.at(-1)?.expanded).toBe(true);
-      expect(markdownContents(panels.at(-1)).join('\n')).toContain('PURE_TEXT_TAIL_1');
+      expect(cards.length).toBeGreaterThan(1);
+      expect(panels).toHaveLength(0);
+      expect(cards.flatMap(markdownContents).join('')).toBe(`${firstText}⏳ 10s`);
 
       const secondText = `${firstText}\n\n${'后续流式内容。'.repeat(500)}\n\nPURE_TEXT_TAIL_2`;
       await adapter.editMessage(
@@ -676,9 +669,9 @@ describe('FeishuAdapter', () => {
 
       cards = [...remoteCards.values()].map((content) => JSON.parse(content));
       panels = cards.flatMap((card) => elementsByTag(card, 'collapsible_panel'));
-      expect(panels.slice(0, -1).every((panel) => panel.expanded === false)).toBe(true);
-      expect(panels.at(-1)?.expanded).toBe(true);
-      const delivered = cards.flatMap(markdownContents).join('\n');
+      expect(panels).toHaveLength(0);
+      const delivered = cards.flatMap(markdownContents).join('');
+      expect(delivered).toBe(`${secondText}⏳ 10s`);
       expect(delivered.match(/PURE_TEXT_START/g)).toHaveLength(1);
       expect(delivered.match(/PURE_TEXT_TAIL_2/g)).toHaveLength(1);
       await adapter.stop();
@@ -821,18 +814,16 @@ describe('FeishuAdapter', () => {
       await adapter.start();
 
       await adapter.editMessage('oc_chat123', 'stream-root', message);
+      const creates = mockMessageCreate.mock.calls.length;
+      const patches = mockMessagePatch.mock.calls.length;
+      expect(creates).toBeGreaterThan(0);
+      expect(patches).toBe(1);
+      const sent = [...mockMessagePatch.mock.calls, ...mockMessageCreate.mock.calls]
+        .flatMap(([request]) => markdownContents(JSON.parse(request.data.content))).join('');
+      expect(sent).toBe(message.text);
       await adapter.editMessage('oc_chat123', 'stream-root', message);
-
-      expect(mockMessageCreate).toHaveBeenCalledTimes(2);
-      expect(mockMessagePatch).toHaveBeenCalledTimes(4);
-      expect(mockMessagePatch).toHaveBeenCalledWith({
-        path: { message_id: 'overflow-1' },
-        data: { content: expect.any(String) },
-      });
-      expect(mockMessagePatch).toHaveBeenCalledWith({
-        path: { message_id: 'overflow-2' },
-        data: { content: expect.any(String) },
-      });
+      expect(mockMessageCreate).toHaveBeenCalledTimes(creates);
+      expect(mockMessagePatch).toHaveBeenCalledTimes(patches);
       await adapter.stop();
     });
 

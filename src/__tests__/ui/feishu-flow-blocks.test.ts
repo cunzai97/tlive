@@ -3,6 +3,7 @@ import type { ProgressData } from '../../shared/formatting/message-types.js';
 import { actionCallback } from '../../shared/core/callbacks.js';
 import type { FeishuCardElement } from '../../server/channels/feishu/card-builder.js';
 import { markdownElement } from '../../server/channels/feishu/card-elements.js';
+import { planFeishuCards } from '../../server/channels/feishu/card-budget.js';
 import {
   buildFlowBlocks,
   collectFlowItems,
@@ -212,7 +213,7 @@ describe('flow blocks: semantic grouping and token accounting', () => {
       tool('Write', 'w1'), tool('Edit', 'e1'), tool('Read', 'r2'), tool('unknown', 'u1'),
     ] }));
     expect(blocks.map((block) => block.kind === 'tool_group' ? block.category : block.kind))
-      .toEqual(['exploration', 'thinking', 'execution', 'edit', 'exploration', 'generic']);
+      .toEqual(['exploration', 'thinking', 'execution', 'editing', 'exploration', 'generic']);
   });
 });
 
@@ -392,8 +393,8 @@ describe('tool display: category policy, failures, details, and overrides', () =
     ['Edit', '查看改动'], ['replace', '查看改动'], ['MultiEdit', '查看改动'],
   ])('renders %s file entries and a snapshot detail button only when detailId exists', (name, label) => {
     const registry = createDefaultToolDisplayRegistry();
-    expect(registry.category(name)).toBe('edit');
-    const call = displayCall({ toolName: name, inputData: { path: 'src/a.ts', edits: [{ file_path: 'src/b.ts' }] }, detailId: 'snapshot_123' });
+    expect(registry.category(name)).toBe('editing');
+    const call = displayCall({ toolName: name, inputData: { path: 'src/a.ts', edits: [{ file_path: 'src/b.ts' }] }, detailId: '12345678-1234-4234-8234-123456789abc' });
     const card = registry.display(call, 'zh').elements;
     expect(JSON.stringify(card)).toContain('src/a.ts');
     expect(JSON.stringify(card)).toContain('src/b.ts');
@@ -401,7 +402,7 @@ describe('tool display: category policy, failures, details, and overrides', () =
     expect(buttons).toHaveLength(1);
     expect(buttons[0]).toMatchObject({
       text: { tag: 'plain_text', content: label },
-      behaviors: [{ type: 'callback', value: { action: 'flow_detail:open:snapshot_123' } }],
+      behaviors: [{ type: 'callback', value: { action: 'flow_detail:open:12345678-1234-4234-8234-123456789abc' } }],
     });
     expect(descendants(registry.display({ ...call, detailId: undefined }, 'zh').elements)
       .filter((item) => item.tag === 'button')).toHaveLength(0);
@@ -468,5 +469,77 @@ describe('FeishuFormatter block-mode integration', () => {
     const card = (msg.feishuElements ?? []) as FeishuCardElement[];
     expect(card.filter((item) => item.header?.title.content.includes('探索工具'))).toHaveLength(2);
     expect(JSON.stringify(msg.feishuElements)).not.toContain('c1 result');
+  });
+});
+
+describe('flow regression: provider counts, valid details and stable streaming identity', () => {
+  it('does not hide a provider error that also occurs in folded intermediate text', () => {
+    const card = elements(progress({ phase: 'failed', errorMessage: 'PROVIDER_ERROR', timeline: [
+      tool('Read', 'r1'), { kind: 'text', text: 'PROVIDER_ERROR' }, tool('Read', 'r2'),
+    ] }));
+    expect(card.some((element) => element.tag === 'markdown' && element.content?.includes('PROVIDER_ERROR'))).toBe(true);
+  });
+
+  it.each(['exactTokenCount', 'exacttokenCount'] as const)('accepts provider %s on accumulated fragments', (field) => {
+    const countTokens = vi.fn(() => 999);
+    const data = progress({ timeline: [
+      tool('Read', 'r1'),
+      { kind: 'thinking', text: 'a'.repeat(400), [field]: 25 },
+      { kind: 'thinking', text: 'b'.repeat(400), [field]: 25 },
+      tool('Read', 'r2'),
+    ] });
+    expect(collectFlowItems(data)[1]).toMatchObject({ tokenCount: 50 });
+    expect(buildFlowBlocks(data, { countTokens })).toHaveLength(1);
+    expect(countTokens).not.toHaveBeenCalled();
+  });
+
+  it.each(['', 'snapshot_123', '12345678-1234-1234-8234-123456789abc', ' ../../file'])('does not manufacture a detail button for invalid ID %j', (detailId) => {
+    const result = createDefaultToolDisplayRegistry().display(displayCall({ toolName: 'Write', detailId }), 'zh');
+    expect(descendants(result.elements).filter((element) => element.tag === 'button')).toHaveLength(0);
+  });
+
+  it('keeps group and existing call element IDs stable when short text and calls join the group', () => {
+    const before = elements(progress({ timeline: [tool('Read', 'long-provider-id-'.repeat(20)), tool('Grep', 'r2')] }));
+    const after = elements(progress({ timeline: [
+      tool('Read', 'long-provider-id-'.repeat(20)), { kind: 'thinking', text: 'short' },
+      { kind: 'text', text: 'still short' }, tool('Grep', 'r2'), tool('Glob', 'r3'),
+    ] }));
+    expect(after[0].element_id).toBe(before[0].element_id);
+    expect(after[0].elements?.[0].element_id).toBe(before[0].elements?.[0].element_id);
+    expect(after[0].elements?.[3].element_id).toBe(before[0].elements?.[1].element_id);
+    const ids = descendants(after).map((element) => element.element_id).filter((id) => typeof id === 'string');
+    expect(ids.length).toBeGreaterThan(5);
+    expect(ids.every((id) => /^[a-zA-Z0-9_]{1,20}$/.test(id as string))).toBe(true);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it('retains sealed budget history when a growing group receives short interleaved text', () => {
+    const timeline = [
+      tool('Read', 'r1', { toolInput: `FIRST_${'a'.repeat(1800)}` }),
+      tool('Grep', 'r2', { toolInput: `SECOND_${'b'.repeat(1800)}` }),
+    ];
+    const card = (entries: FlowTimelineEntry[]) => ({ schema: '2.0', body: { elements: elements(progress({ timeline: entries })) } });
+    const budget = { maxBytes: 1400, maxElements: 160, maxTables: 5 };
+    const before = planFeishuCards(card(timeline), budget);
+    expect(before.length).toBeGreaterThan(1);
+    const after = planFeishuCards(card([
+      timeline[0], { kind: 'thinking', text: 'brief' }, { kind: 'text', text: 'narration' }, timeline[1], tool('Glob', 'r3'),
+    ]), budget, before);
+    const keys = new Set(after.flatMap((page) => page.slices.map((slice) => slice.key)));
+    for (const page of before.filter((page) => page.sealed)) {
+      for (const slice of page.slices) expect(keys.has(slice.key)).toBe(true);
+    }
+    const rendered = after.flatMap((page) => descendants(JSON.parse(page.content).body.elements))
+      .filter((element) => element.tag === 'markdown').map((element) => element.content ?? '').join('');
+    expect(rendered).toContain(`FIRST_${'a'.repeat(1800)}`);
+    expect(rendered).toContain(`SECOND_${'b'.repeat(1800)}`);
+    expect(rendered).toContain('narration');
+  });
+
+  it('keeps ID-less calls stable when a short thought is inserted ahead of a later call', () => {
+    const call = { kind: 'tool' as const, toolName: 'Read', toolInput: 'same' };
+    const before = calls(progress({ timeline: [call, call] })).map((entry) => entry.id);
+    const after = calls(progress({ timeline: [call, { kind: 'thinking', text: 'short' }, call] })).map((entry) => entry.id);
+    expect(after).toEqual(before);
   });
 });

@@ -18,6 +18,7 @@ import { feishuCardActionToInbound, feishuMenuEventToInbound } from './events.js
 import { findPinnedFeishuTopicMetadata } from './topic-recovery.js';
 import {
   editFeishuMessage,
+  getFeishuMessageIds,
   pinFeishuMessage,
   publishFeishuTopicMetadata,
   sendFeishuMessage,
@@ -26,6 +27,10 @@ import {
   startFeishuThreadWithTitle,
 } from './sender.js';
 import { t } from '../../../shared/i18n/index.js';
+import type { FeishuCardFlowSettings } from '../../../shared/feishu-card-config.js';
+import { configureFeishuCardBudget } from './card-budget.js';
+import { createDefaultToolDisplayRegistry } from './tool-display.js';
+import { FeishuToolDetails } from './tool-details.js';
 
 export interface FeishuConfig {
   appId: string;
@@ -36,6 +41,7 @@ export interface FeishuConfig {
 }
 
 export interface FeishuAdapterOptions {
+  cardFlow?: FeishuCardFlowSettings;
   doneButtons?: readonly QuickButtonName[];
   autoPinTopics?: boolean;
   botOpenId?: string;
@@ -54,6 +60,8 @@ export class FeishuAdapter extends BaseChannelAdapter<FeishuRenderedMessage> {
   private botName?: string;
   private configuredBotOpenId?: string;
   private configuredBotName?: string;
+  private readonly options: FeishuAdapterOptions;
+  private toolDetails!: FeishuToolDetails;
 
   constructor(config: FeishuConfig, options: FeishuAdapterOptions = {}) {
     super();
@@ -61,8 +69,8 @@ export class FeishuAdapter extends BaseChannelAdapter<FeishuRenderedMessage> {
     this.autoPinTopics = options.autoPinTopics ?? false;
     this.configuredBotOpenId = options.botOpenId;
     this.configuredBotName = options.botName;
-    // Set platform-specific formatter and policy (Chinese locale for Feishu)
-    this.formatter = new FeishuFormatter('zh', { doneButtons: options.doneButtons });
+    this.options = options;
+    this.configureFormatter();
   }
 
   async start(): Promise<void> {
@@ -70,6 +78,13 @@ export class FeishuAdapter extends BaseChannelAdapter<FeishuRenderedMessage> {
       appId: this.config.appId,
       appSecret: this.config.appSecret,
     });
+    if (this.options.cardFlow) {
+      configureFeishuCardBudget(this.client, {
+        maxBytes: this.options.cardFlow.maxBytes,
+        maxElements: this.options.cardFlow.maxElements,
+      });
+    }
+    this.configureFormatter();
     await this.resolveBotIdentity();
 
     const eventDispatcher = new EventDispatcher({
@@ -91,12 +106,20 @@ export class FeishuAdapter extends BaseChannelAdapter<FeishuRenderedMessage> {
     // Register card action handler for button callbacks and form submissions (schema 2.0 cards)
     eventDispatcher.register({
       'card.action.trigger': async (data: unknown) => {
-        console.log('[feishu] card.action.trigger received:', JSON.stringify(data).slice(0, 500));
+        console.log('[feishu] card.action.trigger received');
         const result = feishuCardActionToInbound(data);
         if (result.missingAction) {
           console.warn('[feishu] card.action.trigger: no action value found');
         }
-        if (result.message) this.messageQueue.push(result.message);
+        if (result.message && this.client) {
+          const detailResponse = await this.toolDetails.handle(
+            result.message,
+            this.client,
+            this.isAuthorized(result.message.userId, result.message.chatId),
+          );
+          if (detailResponse !== undefined) return detailResponse;
+          this.messageQueue.push(result.message);
+        }
         return result.response;
       },
     } as any);
@@ -135,6 +158,7 @@ export class FeishuAdapter extends BaseChannelAdapter<FeishuRenderedMessage> {
       this.wsClient = null;
     }
     this.client = null;
+    this.toolDetails.dispose();
   }
 
   async consumeOne(): Promise<InboundMessage | null> {
@@ -193,7 +217,9 @@ export class FeishuAdapter extends BaseChannelAdapter<FeishuRenderedMessage> {
 
   async send(message: FeishuRenderedMessage): Promise<SendResult> {
     if (!this.client) throw new Error('Feishu client not started');
-    return sendFeishuMessage(this.client, message, (err) => this.classifyError(err));
+    const result = await sendFeishuMessage(this.client, message, (err) => this.classifyError(err));
+    if (result.messageId) this.bindToolDetails(message, result.messageId);
+    return result;
   }
 
   async pinMessage(messageId: string): Promise<void> {
@@ -214,7 +240,12 @@ export class FeishuAdapter extends BaseChannelAdapter<FeishuRenderedMessage> {
     messageId: string,
     message: FeishuRenderedMessage,
   ): Promise<void> {
-    await editFeishuMessage(this.client, messageId, message, (err) => this.classifyError(err));
+    try {
+      await editFeishuMessage(this.client, messageId, message, (err) => this.classifyError(err));
+    } finally {
+      // Earlier pages may have succeeded even if an overflow operation failed.
+      if (this.client) this.bindToolDetails(message, messageId);
+    }
   }
 
   createStreamingSession(
@@ -232,11 +263,12 @@ export class FeishuAdapter extends BaseChannelAdapter<FeishuRenderedMessage> {
       replyToMessageId,
       header,
       replyInThread,
+      classifyError: (error) => this.classifyError(error),
     });
   }
 
   override shouldSplitProgressMessage(message: FeishuRenderedMessage): boolean {
-    return shouldSplitFeishuProgressMessage(message);
+    return shouldSplitFeishuProgressMessage(message, this.client ?? undefined);
   }
 
   async sendTyping(_chatId: string): Promise<void> {
@@ -328,6 +360,32 @@ export class FeishuAdapter extends BaseChannelAdapter<FeishuRenderedMessage> {
     return { appId: this.config.appId, name: this.botName };
   }
 
+  private configureFormatter(): void {
+    this.toolDetails?.dispose();
+    this.toolDetails = new FeishuToolDetails({
+      pageBytes: this.options.cardFlow?.maxBytes,
+      classifyError: (error) => this.classifyError(error),
+    });
+    const registry = createDefaultToolDisplayRegistry();
+    for (const [name, category] of Object.entries(this.options.cardFlow?.toolRules ?? {})) {
+      registry.register(name, category === 'edit' ? 'editing' : category);
+    }
+    this.formatter = new FeishuFormatter('zh', {
+      doneButtons: this.options.doneButtons,
+      flowOptions: {
+        mode: this.options.cardFlow?.mode ?? 'blocks',
+        groupGapTokens: this.options.cardFlow?.groupGapTokens ?? 50,
+        registry,
+      },
+      toolDetails: this.toolDetails,
+    });
+  }
+
+  private bindToolDetails(message: FeishuRenderedMessage, root: string): void {
+    if (!this.client) return;
+    this.toolDetails.bind(message, getFeishuMessageIds(this.client, root));
+  }
+
   private async resolveBotIdentity(): Promise<void> {
     this.botOpenId = this.configuredBotOpenId;
     this.botName = this.configuredBotName;
@@ -360,11 +418,14 @@ async function fetchFeishuBotInfo(
   appId: string,
   appSecret: string,
 ): Promise<{ openId?: string; name?: string }> {
-  const tokenResult = await fetch('https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ app_id: appId, app_secret: appSecret }),
-  }).then((res) => res.json() as Promise<Record<string, any>>);
+  const tokenResult = await fetch(
+    'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal',
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ app_id: appId, app_secret: appSecret }),
+    },
+  ).then((res) => res.json() as Promise<Record<string, any>>);
   if (tokenResult.code !== 0 || !tokenResult.tenant_access_token) {
     throw new Error(tokenResult.msg || `tenant token error ${tokenResult.code}`);
   }

@@ -1,0 +1,363 @@
+import type { Client } from '@larksuiteoapi/node-sdk';
+import fs from 'node:fs';
+import fsPromises from 'node:fs/promises';
+import childProcess from 'node:child_process';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { configureFeishuCardBudget, measureFeishuCard } from '../../server/channels/feishu/card-budget.js';
+import { feishuCardActionToInbound } from '../../server/channels/feishu/events.js';
+import { feishuMessageEventToInbound } from '../../server/channels/feishu/inbound.js';
+import { FeishuToolDetails, type FeishuToolDetailEntry, type FeishuToolDetailsOptions } from '../../server/channels/feishu/tool-details.js';
+import type { FeishuRenderedMessage } from '../../server/channels/feishu/types.js';
+import type { InboundMessage } from '../../server/channels/types.js';
+
+interface Request {
+  path?: { message_id?: string };
+  data: { content: string; reply_in_thread?: boolean; root_id?: string };
+}
+interface Card {
+  header: { template: string };
+  body: { elements: Array<{ text?: { content: string } }> };
+}
+const instances: FeishuToolDetails[] = [];
+afterEach(() => {
+  for (const details of instances.splice(0)) details.dispose();
+});
+function store(options: FeishuToolDetailsOptions = {}): FeishuToolDetails {
+  const details = new FeishuToolDetails({ cleanupIntervalMs: 0, ...options });
+  instances.push(details);
+  return details;
+}
+function sdk() {
+  let sequence = 0;
+  const reply = vi.fn(async (_request: Request) => ({
+    code: 0, data: { message_id: `detail-${++sequence}`, thread_id: 'thread' },
+  }));
+  const create = vi.fn(async (_request: Request) => ({ code: 0, data: { message_id: `created-${++sequence}` } }));
+  const patch = vi.fn(async (_request: Request) => ({ code: 0 }));
+  const del = vi.fn(async (_request: unknown) => ({ code: 0 }));
+  const client = { im: { message: { reply, create, patch, delete: del } } } as unknown as Client;
+  return { client, reply, create, patch, del };
+}
+function entry(overrides: Partial<FeishuToolDetailEntry> = {}): FeishuToolDetailEntry {
+  return {
+    kind: 'tool', toolId: 'call-1', toolName: 'write',
+    inputData: { file_path: '/nonexistent/snapshot.txt', content: 'original' },
+    toolResult: 'written', status: 'completed', ...overrides,
+  };
+}
+function bind(details: FeishuToolDetails, id: string, overrides: Partial<FeishuRenderedMessage> = {}, sources = ['source']) {
+  details.bind({
+    chatId: 'chat', threadId: 'thread', replyToMessageId: 'root', replyInThread: true,
+    flowDetailUserId: 'owner', feishuButtons: [{ label: '查看快照', callbackData: `flow_detail:open:${id}` }],
+    ...overrides,
+  }, sources);
+}
+function inbound(callbackData: string, overrides: Partial<InboundMessage> = {}): InboundMessage {
+  return {
+    channelType: 'feishu', chatId: 'chat', threadId: 'thread', userId: 'owner',
+    text: '', messageId: 'source', callbackData, ...overrides,
+  };
+}
+function open(details: FeishuToolDetails, id: string, client: Client, overrides: Partial<InboundMessage> = {}) {
+  return details.handle(inbound(`flow_detail:open:${id}`, overrides), client, true);
+}
+function action(details: FeishuToolDetails, id: string, verb: string, client: Client, messageId = 'detail-1') {
+  return details.handle(inbound(`flow_detail:${verb}:${id}`, { messageId }), client, true);
+}
+function page(details: FeishuToolDetails, id: string, n: number, client: Client) {
+  return details.handle(inbound(`flow_detail:page:${id}:${n}`, { messageId: 'detail-1' }), client, true);
+}
+function card(request: Request): Card { return JSON.parse(request.data.content) as Card; }
+function body(request: Request): string { return card(request).body.elements[1].text!.content; }
+function responseType(response: Record<string, unknown> | undefined): string | undefined {
+  return (response?.toast as { type?: string } | undefined)?.type;
+}
+async function allPages(details: FeishuToolDetails, id: string, mock: ReturnType<typeof sdk>) {
+  expect(responseType(await open(details, id, mock.client))).toBe('success');
+  const first = mock.reply.mock.calls[0][0];
+  const heading = card(first).body.elements[0].text!.content;
+  const total = Number(/第 1 \/ (\d+) 页/.exec(heading)![1]);
+  const requests = [first];
+  for (let n = 1; n < total; n++) {
+    expect(responseType(await page(details, id, n, mock.client))).toBe('success');
+    requests.push(mock.patch.mock.calls.at(-1)![0]);
+  }
+  return { requests, text: requests.map(body).join(''), total };
+}
+
+describe('FeishuToolDetails snapshot and scoped SDK integration', () => {
+  it('authorizes only the bound owner/chat/thread/source and consumes invalid callbacks', async () => {
+    const details = store();
+    const mock = sdk();
+    const id = details.register('chat', entry())!;
+    bind(details, id);
+    expect(responseType(await details.handle(inbound(`flow_detail:open:${id}`), mock.client, false))).toBe('error');
+    for (const mismatch of [
+      { userId: 'other' }, { chatId: 'other' }, { threadId: 'other' },
+      { threadId: undefined }, { messageId: 'root' }, { messageId: 'unrelated' },
+    ]) expect(responseType(await open(details, id, mock.client, mismatch))).toBe('error');
+    expect(responseType(await details.handle(inbound('flow_detail:open:predictable-path'), mock.client, true))).toBe('error');
+    expect(await details.handle(inbound('ordinary:callback'), mock.client, true)).toBeUndefined();
+    expect(mock.reply).not.toHaveBeenCalled();
+    expect(responseType(await open(details, id, mock.client))).toBe('success');
+    expect(mock.reply).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      path: { message_id: 'root' }, data: expect.objectContaining({ reply_in_thread: true }),
+    }));
+    expect(mock.create).not.toHaveBeenCalled();
+    expect(responseType(await details.handle(inbound(`flow_detail:close:${id}`), mock.client, true))).toBe('error');
+    expect(mock.del).not.toHaveBeenCalled();
+  });
+
+  it('does not let re-binding a known id transfer its ownership or route', async () => {
+    const details = store(); const mock = sdk(); const id = details.register('chat', entry())!;
+    bind(details, id);
+    bind(details, id, { flowDetailUserId: 'attacker' }, ['attacker-source']);
+    expect(responseType(await open(details, id, mock.client, { userId: 'attacker', messageId: 'attacker-source' }))).toBe('error');
+    expect(responseType(await open(details, id, mock.client))).toBe('success');
+  });
+
+  it('uses the same user_id-first identity as actual inbound and card callbacks', async () => {
+    const message = await feishuMessageEventToInbound({
+      sender: { sender_id: { user_id: 'owner', open_id: 'ou-other' } },
+      message: { chat_id: 'chat', message_id: 'request', message_type: 'text', chat_type: 'p2p',
+        thread_id: 'thread', content: JSON.stringify({ text: 'hello' }) },
+    }, {} as Parameters<typeof feishuMessageEventToInbound>[1]);
+    expect(message?.userId).toBe('owner');
+    const details = store(); const mock = sdk(); const id = details.register('chat', entry())!;
+    bind(details, id, { flowDetailUserId: message!.userId });
+    const callback = feishuCardActionToInbound({
+      operator: { user_id: 'owner', open_id: 'ou-other' },
+      context: { open_chat_id: 'chat', open_message_id: 'source', thread_id: 'thread' },
+      action: { value: { action: `flow_detail:open:${id}` } },
+    }).message!;
+    expect(responseType(await details.handle(callback, mock.client, true))).toBe('success');
+  });
+
+  it.each([
+    ['write', { file_path: '/not/on/disk', content: 'original' }, '本次新增／写入内容'],
+    ['replace', { path: '/not/on/disk', oldText: 'before', newText: 'after' }, '替换前：\nbefore\n替换后：\nafter'],
+    ['Edit', { file_path: '/not/on/disk', old_string: 'before', new_string: 'after' }, '替换前：\nbefore\n替换后：\nafter'],
+    ['MultiEdit', { file_path: '/not/on/disk', edits: [{ old_string: 'one', new_string: 'two' }, { old_string: 'three', new_string: 'four' }] }, '替换前：\nthree\n替换后：\nfour'],
+  ])('freezes %s invocation input/result; never opens paths or executes tools', async (toolName, inputData, expected) => {
+    const details = store(); const mock = sdk();
+    const data = entry({ toolName, inputData, toolResult: { output: 'original-result' } });
+    const id = details.register('chat', data)!;
+    data.inputData = { file_path: '/not/on/disk', content: 'latest-file-content' };
+    (data.toolResult as { output: string }).output = 'changed-result';
+    bind(details, id);
+    const result = await allPages(details, id, mock);
+    expect(result.text).toContain(expected);
+    expect(result.text).toContain('original-result');
+    expect(result.text).not.toContain('latest-file-content');
+    expect(result.text).not.toContain('changed-result');
+    expect(result.text).not.toContain('--- /not/on/disk');
+    expect(mock.create).not.toHaveBeenCalled();
+  });
+
+  it('does not fabricate unknown content or completed-but-missing results', () => {
+    const details = store();
+    for (const data of [
+      entry({ inputData: { path: '/x', command: 'edit it' } }),
+      entry({ inputData: undefined, toolInput: 'not JSON' }),
+      entry({ toolResult: undefined }), entry({ status: 'running' }),
+    ]) expect(details.register('chat', data)).toBeUndefined();
+    expect(details.stats.entries).toBe(0);
+  });
+
+  it('labels failed edits as errors with no success action', async () => {
+    const details = store(); const mock = sdk();
+    const id = details.register('chat', entry({ status: 'failed', isError: true, toolResult: 'permission denied' }))!;
+    bind(details, id); await open(details, id, mock.client);
+    const request = mock.reply.mock.calls[0][0];
+    expect(card(request).header.template).toBe('red');
+    expect(body(request)).toContain('不代表改动成功');
+    expect(request.data.content).not.toContain('工具执行成功');
+    expect(request.data.content).not.toContain('primary_filled');
+    expect(request.data.content).not.toContain('查看改动');
+  });
+
+  it('issues opaque UUIDs, deduplicates renders without refreshing TTL and expires exactly', async () => {
+    let now = 100;
+    const details = store({ now: () => now, ttlMs: 50 }); const mock = sdk();
+    const data = entry(); const id = details.register('chat', data)!;
+    expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    bind(details, id);
+    now = 149;
+    expect(details.register('chat', data)).toBe(id);
+    expect(details.stats.entries).toBe(1);
+    now = 150;
+    expect(responseType(await open(details, id, mock.client))).toBe('error');
+    expect(details.stats).toEqual({ entries: 0, bytes: 0 });
+    expect(details.register('chat', data)).not.toBe(id);
+    expect(mock.reply).not.toHaveBeenCalled();
+  });
+
+  it('enforces retained entry and byte limits including scope and page offsets', async () => {
+    const details = store({ maxEntries: 1, maxBytes: 5000 }); const mock = sdk();
+    const first = details.register('chat', entry())!;
+    const second = details.register('chat', entry({ toolId: 'call-2' }))!;
+    expect(second).not.toBe(first);
+    expect(details.stats.entries).toBe(1);
+    expect(responseType(await open(details, first, mock.client))).toBe('error');
+    bind(details, second);
+    expect(details.stats.bytes).toBeLessThanOrEqual(5000);
+    expect(details.register('chat', entry({ inputData: { path: '/huge', content: '大'.repeat(10000) } }))).toBeUndefined();
+    expect(details.stats.entries).toBe(1);
+  });
+
+  it('preserves every code point across pages at the real low client budget, one card per page', async () => {
+    const content = '中文😀 \\"<b>literal</b>\n```ts\nconst a = "x";\n```\n'.repeat(180);
+    const details = store(); const mock = sdk();
+    configureFeishuCardBudget(mock.client, { maxBytes: 3200, maxElements: 40, maxTables: 1 });
+    const id = details.register('chat', entry({ inputData: { file_path: '/nonexistent/snapshot.txt', content } }))!;
+    bind(details, id);
+    const result = await allPages(details, id, mock);
+    expect(result.total).toBeGreaterThan(2);
+    const expected = '工具执行成功 · 本次输入／结果快照\n工具：write\n\n' +
+      `文件：/nonexistent/snapshot.txt\n本次新增／写入内容：\n${content}\n` +
+      '这是本次工具输入内容；不据此断言文件此前不存在，也不展示完整文件差异。\n\n' +
+      `工具输入快照（仅供核对）：\n${JSON.stringify({ content, file_path: '/nonexistent/snapshot.txt' }, null, 2)}\n\n` +
+      '工具结果快照：\nwritten';
+    expect(result.text).toBe(expected);
+    expect(mock.reply).toHaveBeenCalledTimes(1);
+    expect(mock.patch).toHaveBeenCalledTimes(result.total - 1);
+    expect(mock.create).not.toHaveBeenCalled();
+    for (const request of result.requests) {
+      const size = measureFeishuCard(request.data.content);
+      expect(Math.max(size.bytes, size.requestBytes)).toBeLessThanOrEqual(3200);
+      expect(Buffer.byteLength(JSON.stringify(request), 'utf8')).toBeLessThanOrEqual(3200);
+      expect(body(request)).not.toBe(expected);
+      expect(body(request)).not.toMatch(/^[\uDC00-\uDFFF]|[\uD800-\uDBFF]$/);
+    }
+  });
+
+  it('rejects impossible component budgets before any SDK write', async () => {
+    const details = store(); const mock = sdk();
+    configureFeishuCardBudget(mock.client, { maxBytes: 3200, maxElements: 1 });
+    const id = details.register('chat', entry())!; bind(details, id);
+    expect(responseType(await open(details, id, mock.client))).toBe('error');
+    expect(mock.reply).not.toHaveBeenCalled(); expect(mock.create).not.toHaveBeenCalled();
+  });
+
+  it('repeated open reuses the existing detail and serializes concurrent pages', async () => {
+    const details = store({ pageBytes: 3000 }); const mock = sdk();
+    const id = details.register('chat', entry({ inputData: { path: '/x', content: 'x'.repeat(6000) } }))!;
+    bind(details, id);
+    const opens = await Promise.all([open(details, id, mock.client), open(details, id, mock.client)]);
+    expect(opens.map(responseType)).toEqual(['success', 'success']);
+    expect(mock.reply).toHaveBeenCalledTimes(1);
+    let release!: () => void;
+    mock.patch.mockImplementationOnce(async () => { await new Promise<void>((resolve) => { release = resolve; }); return { code: 0 }; });
+    const first = page(details, id, 1, mock.client);
+    await vi.waitFor(() => expect(mock.patch).toHaveBeenCalledTimes(1));
+    const second = page(details, id, 2, mock.client);
+    await Promise.resolve();
+    expect(mock.patch).toHaveBeenCalledTimes(1);
+    release();
+    expect((await Promise.all([first, second])).map(responseType)).toEqual(['success', 'success']);
+    expect(mock.patch).toHaveBeenCalledTimes(2);
+    expect(card(mock.patch.mock.calls[1][0]).body.elements[0].text!.content).toContain('第 3 /');
+  });
+
+  it('withdraws the exact detail and makes reopen a single fresh detail', async () => {
+    const details = store(); const mock = sdk(); const id = details.register('chat', entry())!;
+    bind(details, id); await open(details, id, mock.client);
+    const closed = await action(details, id, 'close', mock.client);
+    expect(responseType(closed)).toBe('success');
+    expect(JSON.stringify(closed)).toContain('撤回');
+    expect(mock.del).toHaveBeenCalledExactlyOnceWith({ path: { message_id: 'detail-1' } });
+    await open(details, id, mock.client);
+    expect(mock.reply).toHaveBeenCalledTimes(2);
+    expect(responseType(await page(details, id, 0, mock.client))).toBe('error');
+  });
+
+  it('falls back to an honest closed placeholder and reopens by patching the same message', async () => {
+    const details = store(); const mock = sdk(); const id = details.register('chat', entry())!;
+    bind(details, id); await open(details, id, mock.client);
+    mock.del.mockResolvedValue({ code: 230001 });
+    const closed = await action(details, id, 'close', mock.client);
+    expect(responseType(closed)).toBe('success');
+    expect(JSON.stringify(closed)).toContain('未能撤回');
+    expect(mock.patch.mock.calls[0][0].path).toEqual({ message_id: 'detail-1' });
+    expect(mock.patch.mock.calls[0][0].data.content).toContain('详情已关闭');
+    expect(mock.patch.mock.calls[0][0].data.content).not.toContain('original');
+    await open(details, id, mock.client);
+    expect(mock.reply).toHaveBeenCalledTimes(1); expect(mock.patch).toHaveBeenCalledTimes(2);
+    expect(body(mock.patch.mock.calls[1][0])).toContain('original');
+  });
+
+  it('never claims close succeeded when both delete and placeholder patch fail', async () => {
+    const details = store(); const mock = sdk(); const id = details.register('chat', entry())!;
+    bind(details, id); await open(details, id, mock.client);
+    mock.del.mockRejectedValue(new Error('private SDK data'));
+    mock.patch.mockResolvedValue({ code: 230099 });
+    const closed = await action(details, id, 'close', mock.client);
+    expect(responseType(closed)).toBe('error');
+    expect(JSON.stringify(closed)).toContain('均未成功');
+    expect(JSON.stringify(closed)).not.toContain('private SDK data');
+    await open(details, id, mock.client);
+    expect(mock.reply).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses fulfilled SDK errors and prevents escaped thread fallback sends', async () => {
+    const details = store(); const mock = sdk(); const id = details.register('chat', entry())!;
+    bind(details, id);
+    mock.reply.mockResolvedValueOnce({ code: 230011, data: { message_id: '', thread_id: 'thread' } });
+    expect(responseType(await open(details, id, mock.client))).toBe('error');
+    expect(mock.create).not.toHaveBeenCalled();
+    expect(responseType(await open(details, id, mock.client))).toBe('success');
+    expect(mock.reply).toHaveBeenCalledTimes(2);
+  });
+
+  it('never reads a file or re-executes tools while registering or viewing snapshots', async () => {
+    const reads = [vi.spyOn(fs, 'readFileSync'), vi.spyOn(fsPromises, 'readFile')];
+    const executes = [vi.spyOn(childProcess, 'execFile'), vi.spyOn(childProcess, 'execSync')];
+    try {
+      const details = store(); const mock = sdk();
+      const data = entry({ toolName: 'Edit', inputData: { path: '/does-not-exist', old_string: 'old', new_string: 'new' } });
+      const id = details.register('chat', data)!;
+      (data.inputData as { new_string: string }).new_string = 'later mutation';
+      bind(details, id); await open(details, id, mock.client);
+      expect(body(mock.reply.mock.calls[0][0])).toContain('替换后：\nnew');
+      for (const spy of [...reads, ...executes]) expect(spy).not.toHaveBeenCalled();
+    } finally {
+      for (const spy of [...reads, ...executes]) spy.mockRestore();
+    }
+  });
+
+  it('bounds source-message authorization and rejects unbound snapshots', async () => {
+    const details = store({ maxSources: 1 }); const mock = sdk(); const id = details.register('chat', entry())!;
+    expect(responseType(await open(details, id, mock.client))).toBe('error');
+    bind(details, id, {}, ['source', 'overflow']);
+    expect(responseType(await open(details, id, mock.client, { messageId: 'overflow' }))).toBe('error');
+    expect(responseType(await open(details, id, mock.client))).toBe('success');
+  });
+
+  it('revalidates expiry after queued work and does not send a queued expired page', async () => {
+    let now = 0;
+    const details = store({ now: () => now, ttlMs: 100, pageBytes: 3000 }); const mock = sdk();
+    const id = details.register('chat', entry({ inputData: { path: '/x', content: 'x'.repeat(6000) } }))!;
+    bind(details, id); await open(details, id, mock.client);
+    let release!: () => void;
+    mock.patch.mockImplementationOnce(async () => { await new Promise<void>((resolve) => { release = resolve; }); return { code: 0 }; });
+    const first = page(details, id, 1, mock.client);
+    await vi.waitFor(() => expect(mock.patch).toHaveBeenCalledTimes(1));
+    const queued = page(details, id, 2, mock.client);
+    now = 100; release();
+    expect(responseType(await first)).toBe('success');
+    expect(responseType(await queued)).toBe('error');
+    expect(mock.patch).toHaveBeenCalledTimes(1);
+    expect(details.stats).toEqual({ entries: 0, bytes: 0 });
+  });
+
+  it('does not commit a failed page update and retries the same page honestly', async () => {
+    const details = store({ pageBytes: 3000 }); const mock = sdk();
+    const id = details.register('chat', entry({ inputData: { path: '/x', content: 'x'.repeat(6000) } }))!;
+    bind(details, id); await open(details, id, mock.client);
+    mock.patch.mockResolvedValueOnce({ code: 230099 });
+    expect(responseType(await page(details, id, 1, mock.client))).toBe('error');
+    expect(responseType(await page(details, id, 1, mock.client))).toBe('success');
+    expect(mock.patch).toHaveBeenCalledTimes(2);
+  });
+
+});

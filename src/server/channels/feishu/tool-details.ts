@@ -3,8 +3,18 @@ import type { Client } from '@larksuiteoapi/node-sdk';
 import { redactSensitiveContent } from '../../../shared/utils/content-filter.js';
 import { classifyDefaultError, type BridgeError } from '../errors.js';
 import type { InboundMessage } from '../types.js';
-import { buildFeishuButtonElements, buildFeishuCard, type FeishuCardElement } from './card-builder.js';
-import { configureFeishuCardBudget, getFeishuCardBudget } from './card-budget.js';
+import {
+  buildFeishuButtonElements,
+  buildFeishuCard,
+  type FeishuCardElement,
+} from './card-builder.js';
+import {
+  configureFeishuCardBudget,
+  fitsFeishuCard,
+  getFeishuCardBudget,
+  planFeishuCards,
+  type FeishuCardBudget,
+} from './card-budget.js';
 import { editFeishuMessage, sendFeishuMessage } from './sender.js';
 import type { FeishuRenderedMessage } from './types.js';
 
@@ -53,12 +63,15 @@ interface Snapshot {
   readonly text: string;
   readonly outcome: Outcome;
   readonly expiresAt: number;
+  openGeneration: number;
   bytes: number;
   scope?: Readonly<Scope>;
   sources: Set<string>;
   /** UTF-16 offsets are always at Unicode code-point boundaries; no copied page bodies. */
   pages?: ReadonlyArray<readonly [number, number]>;
   detail?: { messageId: string; page: number; state: 'open' | 'placeholder' | 'deleted' };
+  /** Fixed once opened: existing navigation must not silently change page boundaries. */
+  pageBudget?: string;
   tail: Promise<void>;
   pending: number;
 }
@@ -105,7 +118,9 @@ function canonicalJson(value: unknown): string {
     const result = Array.isArray(item)
       ? item.map((child) => normalize(child, depth + 1))
       : Object.fromEntries(
-          Object.keys(item).sort().filter((key) => (item as Record<string, unknown>)[key] !== undefined)
+          Object.keys(item)
+            .sort()
+            .filter((key) => (item as Record<string, unknown>)[key] !== undefined)
             .map((key) => [key, normalize((item as Record<string, unknown>)[key], depth + 1)]),
         );
     ancestors.delete(item);
@@ -137,13 +152,13 @@ function editSections(input: unknown): string[] {
     if (oldText !== undefined || newText !== undefined) {
       sections.push(
         `文件：${path ?? '未提供文件路径'}\n本次改动（替换片段）\n` +
-        '未提供旧文件全文；以下仅为本次替换片段，不是完整文件差异。\n' +
-        `替换前：\n${oldText ?? '（未提供旧片段）'}\n替换后：\n${newText ?? '（未提供新片段）'}`,
+          '未提供旧文件全文；以下仅为本次替换片段，不是完整文件差异。\n' +
+          `替换前：\n${oldText ?? '（未提供旧片段）'}\n替换后：\n${newText ?? '（未提供新片段）'}`,
       );
     } else if (content !== undefined) {
       sections.push(
         `文件：${path ?? '未提供文件路径'}\n本次新增／写入内容：\n${content}\n` +
-        '这是本次工具输入内容；不据此断言文件此前不存在，也不展示完整文件差异。',
+          '这是本次工具输入内容；不据此断言文件此前不存在，也不展示完整文件差异。',
       );
     }
     for (const name of ['edits', 'changes', 'files', 'replacements']) {
@@ -156,10 +171,15 @@ function editSections(input: unknown): string[] {
 
 function outcome(entry: FeishuToolDetailEntry): Outcome | undefined {
   const status = entry.status?.toLowerCase();
-  if (['running', 'pending', 'queued', 'started', 'waiting'].includes(status ?? '')) return undefined;
+  if (['running', 'pending', 'queued', 'started', 'waiting'].includes(status ?? ''))
+    return undefined;
   if (entry.isError || ['failed', 'error'].includes(status ?? '')) return 'failed';
-  if (['interrupted', 'cancelled', 'canceled', 'aborted'].includes(status ?? '')) return 'interrupted';
-  if (entry.isError === false || ['completed', 'success', 'succeeded', 'done'].includes(status ?? '')) {
+  if (['interrupted', 'cancelled', 'canceled', 'aborted'].includes(status ?? ''))
+    return 'interrupted';
+  if (
+    entry.isError === false ||
+    ['completed', 'success', 'succeeded', 'done'].includes(status ?? '')
+  ) {
     return 'success';
   }
   return 'returned';
@@ -222,7 +242,9 @@ export class FeishuToolDetails {
 
   constructor(options: FeishuToolDetailsOptions = {}) {
     const positive = (value: number | undefined, fallback: number): number =>
-      value !== undefined && Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+      value !== undefined && Number.isFinite(value) && value > 0
+        ? Math.max(1, Math.floor(value))
+        : fallback;
     this.now = options.now ?? Date.now;
     this.classifyError = options.classifyError ?? classifyDefaultError;
     this.ttlMs = positive(options.ttlMs, 30 * 60_000);
@@ -232,8 +254,10 @@ export class FeishuToolDetails {
     this.maxSources = Math.min(64, positive(options.maxSources, 32));
     this.maxPending = Math.min(32, positive(options.maxPending, 16));
     if (options.cleanupIntervalMs !== 0) {
-      this.timer = setInterval(() => this.prune(),
-        Math.min(this.ttlMs, positive(options.cleanupIntervalMs, 60_000)));
+      this.timer = setInterval(
+        () => this.prune(),
+        Math.min(this.ttlMs, positive(options.cleanupIntervalMs, 60_000)),
+      );
       this.timer.unref();
     }
   }
@@ -246,7 +270,8 @@ export class FeishuToolDetails {
 
   register(chatId: string, entry: FeishuToolDetailEntry): string | undefined {
     this.prune();
-    if (this.disposed || !validIdentifier(chatId) || !validIdentifier(entry.toolId)) return undefined;
+    if (this.disposed || !validIdentifier(chatId) || !validIdentifier(entry.toolId))
+      return undefined;
     const result = entry.toolResult !== undefined ? entry.toolResult : entry.result;
     const state = outcome(entry);
     // A completed flag alone is NOT a completed result snapshot. Empty string/null are real results.
@@ -261,15 +286,24 @@ export class FeishuToolDetails {
         input = JSON.parse(raw);
       }
       const serialized = canonicalJson({
-        chatId, toolId: entry.toolId, toolName: entry.toolName ?? '', input, result,
-        outcome: state, status: entry.status ?? '',
+        chatId,
+        toolId: entry.toolId,
+        toolName: entry.toolName ?? '',
+        input,
+        result,
+        outcome: state,
+        status: entry.status ?? '',
       });
       if (Buffer.byteLength(serialized, 'utf8') > this.maxBytes) return undefined;
       const key = createHash('sha256').update(serialized).digest('hex');
       const existing = this.keys.get(key);
       if (existing) return existing; // Rendering repeatedly must not renew TTL or allocate snapshots.
       // Clone via JSON first. Mutating the caller's input/results cannot change these strings.
-      const cloned = JSON.parse(serialized) as { input: unknown; result: unknown; toolName: string };
+      const cloned = JSON.parse(serialized) as {
+        input: unknown;
+        result: unknown;
+        toolName: string;
+      };
       const sections = editSections(cloned.input);
       if (sections.length === 0) return undefined;
       const labels: Record<Outcome, string> = {
@@ -278,19 +312,28 @@ export class FeishuToolDetails {
         interrupted: '工具执行中断 · 输入／结果快照（不代表改动完成）',
         returned: '工具结果已返回 · 执行状态未提供（不据此断言成功）',
       };
-      const resultText = typeof cloned.result === 'string'
-        ? cloned.result : JSON.stringify(cloned.result, null, 2);
+      const resultText =
+        typeof cloned.result === 'string' ? cloned.result : JSON.stringify(cloned.result, null, 2);
       const text = redactSensitiveContent(
         `${labels[state]}\n工具：${cloned.toolName}\n\n${sections.join('\n\n')}\n\n` +
-        `工具输入快照（仅供核对）：\n${JSON.stringify(cloned.input, null, 2)}\n\n` +
-        `工具结果快照：\n${resultText}`,
+          `工具输入快照（仅供核对）：\n${JSON.stringify(cloned.input, null, 2)}\n\n` +
+          `工具结果快照：\n${resultText}`,
       );
       const id = randomUUID();
-      const bytes = Buffer.byteLength(text + id + key + chatId, 'utf8') + 128;
+      const bytes = Buffer.byteLength(text + id + key + chatId, 'utf8') + 640;
       if (!this.reserve(bytes, true)) return undefined;
       const snapshot: Snapshot = {
-        id, key, chatId, text, outcome: state, expiresAt: this.now() + this.ttlMs, bytes,
-        sources: new Set(), tail: Promise.resolve(), pending: 0,
+        id,
+        key,
+        chatId,
+        text,
+        outcome: state,
+        expiresAt: this.now() + this.ttlMs,
+        openGeneration: 0,
+        bytes,
+        sources: new Set(),
+        tail: Promise.resolve(),
+        pending: 0,
       };
       this.snapshots.set(id, snapshot);
       this.keys.set(key, id);
@@ -303,27 +346,38 @@ export class FeishuToolDetails {
 
   bind(message: DetailMessage, messageIds: string[]): void {
     this.prune();
-    if (this.disposed || !validIdentifier(message.flowDetailUserId) ||
-        !validIdentifier(message.chatId) ||
-        (message.threadId !== undefined && !validIdentifier(message.threadId))) return;
+    if (
+      this.disposed ||
+      !validIdentifier(message.flowDetailUserId) ||
+      !validIdentifier(message.chatId) ||
+      (message.threadId !== undefined && !validIdentifier(message.threadId))
+    )
+      return;
     const sources = [...new Set(messageIds.filter(validIdentifier))].slice(0, this.maxSources);
     const replyToMessageId = message.replyToMessageId ?? sources[0];
     if (!validIdentifier(replyToMessageId) || sources.length === 0) return;
     if (message.threadId && message.replyInThread === false) return;
     const scope: Scope = {
-      chatId: message.chatId, threadId: message.threadId,
-      ownerUserId: message.flowDetailUserId, replyToMessageId,
+      chatId: message.chatId,
+      threadId: message.threadId,
+      ownerUserId: message.flowDetailUserId,
+      replyToMessageId,
       replyInThread: !!message.threadId || !!message.replyInThread,
       receiveIdType: message.receiveIdType,
     };
     for (const id of openIds(message)) {
       const snapshot = this.snapshots.get(id);
-      if (!snapshot || snapshot.chatId !== message.chatId || snapshot.expiresAt <= this.now()) continue;
+      if (!snapshot || snapshot.chatId !== message.chatId || snapshot.expiresAt <= this.now())
+        continue;
       if (snapshot.scope && canonicalJson(snapshot.scope) !== canonicalJson(scope)) continue;
       const nextSources = new Set([...snapshot.sources, ...sources].slice(0, this.maxSources));
       const pages = snapshot.pages ?? this.paginate(snapshot, scope);
       if (!pages) continue;
-      const extra = Buffer.byteLength([...nextSources].filter((source) => !snapshot.sources.has(source)).join(''), 'utf8') +
+      const extra =
+        Buffer.byteLength(
+          [...nextSources].filter((source) => !snapshot.sources.has(source)).join(''),
+          'utf8',
+        ) +
         (snapshot.scope ? 0 : Buffer.byteLength(canonicalJson(scope), 'utf8') + pages.length * 16);
       if (!this.reserve(extra, false, snapshot.id)) continue;
       snapshot.scope ??= Object.freeze({ ...scope });
@@ -335,7 +389,9 @@ export class FeishuToolDetails {
   }
 
   async handle(
-    message: InboundMessage, client: Client, authorized: boolean,
+    message: InboundMessage,
+    client: Client,
+    authorized: boolean,
   ): Promise<Record<string, unknown> | undefined> {
     const callback = message.callbackData;
     if (!callback?.startsWith('flow_detail:')) return undefined;
@@ -345,25 +401,36 @@ export class FeishuToolDetails {
     if (!authorized) return toast('error', DENIED);
     this.prune();
     const snapshot = this.snapshots.get(action.id);
-    if (this.disposed || !snapshot || snapshot.expiresAt <= this.now()) return toast('error', EXPIRED);
+    if (this.disposed || !snapshot || snapshot.expiresAt <= this.now())
+      return toast('error', EXPIRED);
     if (!this.permitted(snapshot, message, action)) return toast('error', DENIED);
     if (snapshot.pending >= this.maxPending) return toast('error', '详情正在处理，请稍后重试。');
     snapshot.pending++;
     const work = snapshot.tail.then(async () => {
       // Revalidate after waiting: a previous queued close/reopen may change the target.
-      if (this.disposed || this.snapshots.get(action.id) !== snapshot ||
-          snapshot.expiresAt <= this.now()) return toast('error', EXPIRED);
+      if (
+        this.disposed ||
+        this.snapshots.get(action.id) !== snapshot ||
+        snapshot.expiresAt <= this.now()
+      )
+        return toast('error', EXPIRED);
       if (!this.permitted(snapshot, message, action)) return toast('error', DENIED);
       try {
         return await this.perform(snapshot, action, client);
       } catch {
         // Never leak SDK payloads (which may include content, tokens, or unrelated IDs) in toasts.
-        return toast('error', action.verb === 'close'
-          ? '详情关闭失败；撤回和已关闭占位更新均未成功，请重试。'
-          : '详情操作失败，未确认完成；请重试。');
+        return toast(
+          'error',
+          action.verb === 'close'
+            ? '详情关闭失败；撤回和已关闭占位更新均未成功，请重试。'
+            : '详情操作失败，未确认完成；请重试。',
+        );
       }
     });
-    snapshot.tail = work.then(() => undefined, () => undefined);
+    snapshot.tail = work.then(
+      () => undefined,
+      () => undefined,
+    );
     try {
       return await work;
     } finally {
@@ -382,17 +449,49 @@ export class FeishuToolDetails {
 
   private permitted(snapshot: Snapshot, message: InboundMessage, action: Action): boolean {
     const scope = snapshot.scope;
-    if (!scope || !snapshot.pages || message.channelType !== 'feishu' ||
-        message.chatId !== scope.chatId || message.threadId !== scope.threadId ||
-        message.userId !== scope.ownerUserId || !message.messageId) return false;
+    if (
+      !scope ||
+      !snapshot.pages ||
+      message.channelType !== 'feishu' ||
+      message.chatId !== scope.chatId ||
+      message.threadId !== scope.threadId ||
+      message.userId !== scope.ownerUserId ||
+      !message.messageId
+    )
+      return false;
     if (action.verb === 'open') return snapshot.sources.has(message.messageId);
     return message.messageId === snapshot.detail?.messageId;
   }
 
-  private async perform(snapshot: Snapshot, action: Action, client: Client): Promise<Record<string, unknown>> {
+  private async perform(
+    snapshot: Snapshot,
+    action: Action,
+    client: Client,
+  ): Promise<Record<string, unknown>> {
     const scope = snapshot.scope!;
-    const safeClient = checkedClient(client, scope);
+    const budget = getFeishuCardBudget(client);
+    const budgetKey = canonicalJson(budget);
     const detail = snapshot.detail;
+    if (action.verb !== 'close') {
+      if (snapshot.pageBudget && snapshot.pageBudget !== budgetKey) {
+        throw new Error('Detail budget changed; refusing to reinterpret existing navigation');
+      }
+      if (!snapshot.pageBudget) {
+        // bind has no client. Finalize offsets against the actual configured client
+        // before sending, otherwise the shared sender could emit overflow cards.
+        const pages = this.paginate(snapshot, scope, budget);
+        if (!pages) throw new Error('Detail cannot fit the configured card budget');
+        const extra = (pages.length - snapshot.pages!.length) * 16;
+        if (extra > 0 && !this.reserve(extra, false, snapshot.id)) {
+          throw new Error('Detail offset budget exhausted');
+        }
+        snapshot.pages = pages;
+        snapshot.bytes += extra;
+        this.retainedBytes += extra;
+        snapshot.pageBudget = budgetKey;
+      }
+    }
+    const safeClient = checkedClient(client, scope);
     if (action.verb === 'open') {
       if (detail?.state === 'open') return toast('success', '详情已打开，请查看原详情卡。');
       const card = this.card(snapshot, scope, 0, snapshot.pages!.length);
@@ -402,7 +501,8 @@ export class FeishuToolDetails {
         detail.page = 0;
       } else {
         const result = await sendFeishuMessage(safeClient, card, this.classifyError);
-        if (!result.success || !validIdentifier(result.messageId)) throw new Error('No confirmed detail message');
+        if (!result.success || !validIdentifier(result.messageId))
+          throw new Error('No confirmed detail message');
         snapshot.detail = { messageId: result.messageId, page: 0, state: 'open' };
         // Detail IDs have a fixed accounting allowance in each snapshot's base bytes.
       }
@@ -415,8 +515,12 @@ export class FeishuToolDetails {
         return toast('error', '详情已关闭或页码无效，请从原卡片重新打开。');
       }
       if (detail.page !== page) {
-        await editFeishuMessage(safeClient, detail.messageId,
-          this.card(snapshot, scope, page, snapshot.pages!.length), this.classifyError);
+        await editFeishuMessage(
+          safeClient,
+          detail.messageId,
+          this.card(snapshot, scope, page, snapshot.pages!.length),
+          this.classifyError,
+        );
         detail.page = page;
       }
       return toast('success', '详情页已更新。');
@@ -426,42 +530,70 @@ export class FeishuToolDetails {
       const result = await client.im.message.delete({ path: { message_id: detail.messageId } });
       assertSdkSuccess(result);
       detail.state = 'deleted';
+      snapshot.openGeneration++;
+      return toast('success', '详情已撤回；平台可能保留撤回提示。');
     } catch {
       const placeholder: FeishuRenderedMessage = {
-        ...scopeRoute(scope), feishuHeader: { template: 'blue', title: '工具详情' },
+        ...scopeRoute(scope),
+        feishuHeader: { template: 'blue', title: '工具详情' },
         feishuElements: [plain('详情已关闭；可从原工具卡片重新打开。')],
       };
       await editFeishuMessage(safeClient, detail.messageId, placeholder, this.classifyError);
       detail.state = 'placeholder';
     }
-    return toast('success', '详情已关闭。');
+    return toast('success', '详情未能撤回，已更新为关闭占位；可从原卡片重新打开。');
   }
 
-  private card(snapshot: Snapshot, scope: Scope, page: number, total: number, content?: string): FeishuRenderedMessage {
+  private card(
+    snapshot: Snapshot,
+    scope: Scope,
+    page: number,
+    total: number,
+    content?: string,
+  ): FeishuRenderedMessage {
     const bounds = snapshot.pages?.[page];
     const body = content ?? (bounds ? snapshot.text.slice(bounds[0], bounds[1]) : '');
     return {
       ...scopeRoute(scope),
-      feishuHeader: { template: snapshot.outcome === 'failed' ? 'red' : 'blue', title: '工具编辑详情 · 快照' },
+      deliveryId: `${snapshot.id}:open:${snapshot.openGeneration}`,
+      feishuHeader: {
+        template: snapshot.outcome === 'failed' ? 'red' : 'blue',
+        title: '工具编辑详情 · 快照',
+      },
       // plain_text is intentional: arbitrary source code/fences/HTML/Markdown remain literal.
-      feishuElements: [plain(`第 ${page + 1} / ${total} 页 · 只展示当前页 · 内容按原样文本显示`), plain(body)],
+      feishuElements: [
+        plain(`第 ${page + 1} / ${total} 页 · 只展示当前页 · 内容按原样文本显示`),
+        plain(body),
+      ],
       feishuButtons: [
-        ...(page > 0 ? [{ label: '上一页', callbackData: `flow_detail:page:${snapshot.id}:${page - 1}` }] : []),
-        ...(page + 1 < total ? [{ label: '下一页', callbackData: `flow_detail:page:${snapshot.id}:${page + 1}` }] : []),
+        ...(page > 0
+          ? [{ label: '上一页', callbackData: `flow_detail:page:${snapshot.id}:${page - 1}` }]
+          : []),
+        ...(page + 1 < total
+          ? [{ label: '下一页', callbackData: `flow_detail:page:${snapshot.id}:${page + 1}` }]
+          : []),
         { label: '关闭详情', callbackData: `flow_detail:close:${snapshot.id}`, style: 'danger' },
       ],
     };
   }
 
-  private paginate(snapshot: Snapshot, scope: Scope): ReadonlyArray<readonly [number, number]> | undefined {
+  private paginate(
+    snapshot: Snapshot,
+    scope: Scope,
+    budget?: FeishuCardBudget,
+  ): ReadonlyArray<readonly [number, number]> | undefined {
     const pages: Array<readonly [number, number]> = [];
     let start = 0;
     let end = 0;
     let size = 0;
     // Measure the worst page index and BOTH navigation buttons, not only the first page.
-    const sample = this.card(snapshot, scope, 999_999_998, 999_999_999, '');
+    const sample = this.card(snapshot, scope, 999_999_997, 999_999_999, '');
     const baseline = serializedBudget(sample);
-    const available = this.pageBytes - baseline - 64;
+    const limit = Math.min(this.pageBytes, budget?.maxBytes ?? this.pageBytes);
+    // The shared planner reserves space for final status/footer changes.
+    const plannerReserve = budget ? Math.min(512, Math.floor(budget.maxBytes * 0.15)) : 0;
+    const available = limit - baseline - 64 - plannerReserve;
+    if (budget && !fitsFeishuCard(serializedCard(sample), budget)) return undefined;
     if (available < 32) return undefined;
     // Outer API content is a JSON string containing card JSON. Count its double escaping.
     for (const point of snapshot.text) {
@@ -478,8 +610,20 @@ export class FeishuToolDetails {
     // Verify actual final card and envelope for every page before retaining the page index.
     for (let index = 0; index < pages.length; index++) {
       const [from, to] = pages[index];
-      if (serializedBudget(this.card(snapshot, scope, index, pages.length,
-        snapshot.text.slice(from, to))) > this.pageBytes) return undefined;
+      const message = this.card(
+        snapshot,
+        scope,
+        index,
+        pages.length,
+        snapshot.text.slice(from, to),
+      );
+      if (
+        serializedBudget(message) > limit ||
+        (budget &&
+          (!fitsFeishuCard(serializedCard(message), budget) ||
+            planFeishuCards(JSON.parse(serializedCard(message)), budget).length !== 1))
+      )
+        return undefined;
     }
     return Object.freeze(pages);
   }
@@ -499,12 +643,17 @@ export class FeishuToolDetails {
   private reserve(bytes: number, newEntry: boolean, protectedId?: string): boolean {
     if (bytes > this.maxBytes) return false;
     for (const snapshot of this.snapshots.values()) {
-      if (this.retainedBytes + bytes <= this.maxBytes &&
-          (!newEntry || this.snapshots.size < this.maxEntries)) break;
+      if (
+        this.retainedBytes + bytes <= this.maxBytes &&
+        (!newEntry || this.snapshots.size < this.maxEntries)
+      )
+        break;
       if (snapshot.pending === 0 && snapshot.id !== protectedId) this.remove(snapshot);
     }
-    return this.retainedBytes + bytes <= this.maxBytes &&
-      (!newEntry || this.snapshots.size < this.maxEntries);
+    return (
+      this.retainedBytes + bytes <= this.maxBytes &&
+      (!newEntry || this.snapshots.size < this.maxEntries)
+    );
   }
 }
 
@@ -514,22 +663,41 @@ function plain(content: string): FeishuCardElement {
 
 function scopeRoute(scope: Scope): FeishuRenderedMessage {
   return {
-    chatId: scope.chatId, threadId: scope.threadId, receiveIdType: scope.receiveIdType,
-    replyToMessageId: scope.replyToMessageId, replyInThread: scope.replyInThread,
+    chatId: scope.chatId,
+    threadId: scope.threadId,
+    receiveIdType: scope.receiveIdType,
+    replyToMessageId: scope.replyToMessageId,
+    replyInThread: scope.replyInThread,
   };
 }
 
-function serializedBudget(message: FeishuRenderedMessage): number {
-  const content = buildFeishuCard({
+function serializedCard(message: FeishuRenderedMessage): string {
+  return buildFeishuCard({
     header: message.feishuHeader as Parameters<typeof buildFeishuCard>[0]['header'],
-    elements: [...(message.feishuElements ?? []) as FeishuCardElement[], ...buildFeishuButtonElements(message.feishuButtons)],
+    elements: [
+      ...((message.feishuElements ?? []) as FeishuCardElement[]),
+      ...buildFeishuButtonElements(message.feishuButtons),
+    ],
   });
+}
+
+function serializedBudget(message: FeishuRenderedMessage): number {
+  const content = serializedCard(message);
   const envelope = {
-    path: { message_id: message.replyToMessageId }, params: { receive_id_type: message.receiveIdType ?? 'chat_id' },
-    data: { receive_id: message.chatId, root_id: message.replyToMessageId, reply_in_thread: message.replyInThread,
-      msg_type: 'interactive', content },
+    path: { message_id: message.replyToMessageId },
+    params: { receive_id_type: message.receiveIdType ?? 'chat_id' },
+    data: {
+      receive_id: message.chatId,
+      root_id: message.replyToMessageId,
+      reply_in_thread: message.replyInThread,
+      msg_type: 'interactive',
+      content,
+    },
   };
-  return Math.max(Buffer.byteLength(content, 'utf8'), Buffer.byteLength(JSON.stringify(envelope), 'utf8'));
+  return Math.max(
+    Buffer.byteLength(content, 'utf8'),
+    Buffer.byteLength(JSON.stringify(envelope), 'utf8'),
+  );
 }
 
 function assertSdkSuccess(value: unknown): void {
@@ -541,32 +709,63 @@ function assertSdkSuccess(value: unknown): void {
  * This scoped facade forbids that fallback and checks SDK *resolved* errors for all writes.
  * It still uses the public send/edit functions and their shared capacity checks.
  */
+const scopedClients = new WeakMap<Client, WeakMap<Scope, Client>>();
 function checkedClient(client: Client, scope: Scope): Client {
+  let cache = scopedClients.get(client);
+  if (!cache) {
+    cache = new WeakMap();
+    scopedClients.set(client, cache);
+  }
+  const cached = cache.get(scope);
+  if (cached) {
+    configureFeishuCardBudget(cached, getFeishuCardBudget(client));
+    return cached;
+  }
   type Write = (request: any) => Promise<unknown>;
-  const wrap = (operation: 'create' | 'reply' | 'patch'): Write => async (request) => {
-    if (operation === 'create' && (scope.replyInThread || request.data?.root_id !== scope.replyToMessageId)) {
-      throw new Error('Refusing a detail send outside its bound reply route');
-    }
-    if (operation === 'reply' && (request.path?.message_id !== scope.replyToMessageId ||
-        request.data?.reply_in_thread !== scope.replyInThread)) {
-      throw new Error('Refusing a detail reply outside its bound route');
-    }
-    const result = await (client.im.message[operation] as Write)(request);
-    assertSdkSuccess(result);
-    const threadId = object(object(result)?.data)?.thread_id;
-    if (operation === 'reply' && scope.threadId && threadId !== undefined && threadId !== scope.threadId) {
-      throw new Error('Feishu returned a different detail thread');
-    }
-    return result;
-  };
-  const scopedClient = { im: { message: {
-    create: wrap('create'), reply: wrap('reply'), patch: wrap('patch'),
-    delete: async (request: any) => {
-      const result = await client.im.message.delete(request);
+  const wrap =
+    (operation: 'create' | 'reply' | 'patch'): Write =>
+    async (request) => {
+      if (
+        operation === 'create' &&
+        (scope.replyInThread || request.data?.root_id !== scope.replyToMessageId)
+      ) {
+        throw new Error('Refusing a detail send outside its bound reply route');
+      }
+      if (
+        operation === 'reply' &&
+        (request.path?.message_id !== scope.replyToMessageId ||
+          request.data?.reply_in_thread !== scope.replyInThread)
+      ) {
+        throw new Error('Refusing a detail reply outside its bound route');
+      }
+      const result = await (client.im.message[operation] as Write)(request);
       assertSdkSuccess(result);
+      const threadId = object(object(result)?.data)?.thread_id;
+      if (
+        operation === 'reply' &&
+        scope.threadId &&
+        threadId !== undefined &&
+        threadId !== scope.threadId
+      ) {
+        throw new Error('Feishu returned a different detail thread');
+      }
       return result;
+    };
+  const scopedClient = {
+    im: {
+      message: {
+        create: wrap('create'),
+        reply: wrap('reply'),
+        patch: wrap('patch'),
+        delete: async (request: any) => {
+          const result = await client.im.message.delete(request);
+          assertSdkSuccess(result);
+          return result;
+        },
+      },
     },
-  } } } as unknown as Client;
+  } as unknown as Client;
   configureFeishuCardBudget(scopedClient, getFeishuCardBudget(client));
+  cache.set(scope, scopedClient);
   return scopedClient;
 }

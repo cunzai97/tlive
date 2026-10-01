@@ -13,12 +13,22 @@ import { t, type Locale } from '../../../shared/i18n/index.js';
 
 const SEPARATOR = '───────────────';
 
-function formatContextUsage(ctx: { tokens: number | null; contextWindow: number; percent: number | null }): string {
+function formatContextUsage(ctx: {
+  tokens: number | null;
+  contextWindow: number;
+  percent: number | null;
+}): string {
   if (ctx.contextWindow <= 0) return '';
-  const tokensStr = ctx.tokens !== null
-    ? (ctx.tokens >= 1000 ? `${(ctx.tokens / 1000).toFixed(1)}k` : `${ctx.tokens}`)
-    : '?';
-  const windowStr = ctx.contextWindow >= 1000 ? `${(ctx.contextWindow / 1000).toFixed(0)}k` : `${ctx.contextWindow}`;
+  const tokensStr =
+    ctx.tokens !== null
+      ? ctx.tokens >= 1000
+        ? `${(ctx.tokens / 1000).toFixed(1)}k`
+        : `${ctx.tokens}`
+      : '?';
+  const windowStr =
+    ctx.contextWindow >= 1000
+      ? `${(ctx.contextWindow / 1000).toFixed(0)}k`
+      : `${ctx.contextWindow}`;
   const percentStr = ctx.percent !== null ? ` ${Math.round(ctx.percent)}%` : '';
   return `🧠 ${tokensStr}/${windowStr}${percentStr}`;
 }
@@ -109,7 +119,9 @@ export class ProgressContentBuilder {
 
   getStateSnapshot(input: RenderInput, content: string): MessageRendererState {
     const currentPermission = input.permissionQueue[0];
-    return {
+    // Async channel flushes must never observe subsequent renderer mutations,
+    // including nested tool inputData shared by the timeline and tool log.
+    return structuredClone<MessageRendererState>({
       phase:
         input.permissionQueue.length > 0
           ? 'waiting_permission'
@@ -148,7 +160,7 @@ export class ProgressContentBuilder {
       contextUsage: input.contextUsage,
       apiRetry: input.apiRetry,
       compacting: input.compacting,
-    };
+    });
   }
 
   buildFooter(input: RenderInput, _locale: Locale = 'zh'): string {

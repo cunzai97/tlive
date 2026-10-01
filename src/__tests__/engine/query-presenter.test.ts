@@ -147,6 +147,28 @@ describe('QueryExecutionPresenter', () => {
     expect(bodyText).not.toContain('Plan first.');
   });
 
+  it('propagates Feishu multi-card edit failures without creating a duplicate stream', async () => {
+    const { presenter, adapter, sent } = createPresenter({
+      adapter: {
+        channelType: 'feishu',
+        editMessage: vi.fn().mockRejectedValue(new Error('format failure after first page')),
+      },
+      getMessageId: () => 'progress-card',
+    });
+    await expect(presenter.flush('content', true, undefined, baseState({ turnId: 'turn' })))
+      .rejects.toThrow('format failure');
+    expect(adapter.editMessage).toHaveBeenCalledOnce();
+    expect(sent).toHaveLength(0);
+  });
+
+  it('uses stable per-turn delivery identities and binds the owner for detail authorization', async () => {
+    const { presenter, sent } = createPresenter();
+    await presenter.flush('content', false, undefined, baseState({ turnId: 'turn' }));
+    await presenter.flush('content', false, undefined, baseState({ turnId: 'turn' }));
+    expect(sent.map((message) => message.deliveryId)).toEqual(['turn', 'turn']);
+    expect(sent.map((message) => message.flowDetailUserId)).toEqual(['user-1', 'user-1']);
+  });
+
   it('falls back to a new bubble when editing the progress card fails', async () => {
     const { presenter, sent, adapter } = createPresenter({
       adapter: {

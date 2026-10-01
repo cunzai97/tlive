@@ -1,10 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import type { Client } from '@larksuiteoapi/node-sdk';
-import type { SendResult, ThreadStartResult } from '../types.js';
 import type { BridgeError } from '../errors.js';
-import { markdownToFeishu, downgradeHeadings, splitLargeTables } from './markdown.js';
-import { buildFeishuCard, buildFeishuButtonElements } from './card-builder.js';
-import type { FeishuCardElement } from './card-builder.js';
+import type { SendResult, ThreadStartResult } from '../types.js';
+import { getFeishuUploadKey } from './buffers.js';
+import type { CardObject, FeishuCardBudget, PlannedFeishuCard } from './card-budget.js';
 import {
   assertFeishuCardBudget,
   checkedFeishuResult,
@@ -13,9 +12,10 @@ import {
   lowerFeishuCardBudget as lowerBudget,
   planFeishuCards,
 } from './card-budget.js';
-import type { CardObject, FeishuCardBudget, PlannedFeishuCard } from './card-budget.js';
+import type { FeishuCardElement } from './card-builder.js';
+import { buildFeishuButtonElements, buildFeishuCard } from './card-builder.js';
+import { downgradeHeadings, markdownToFeishu } from './markdown.js';
 import type { FeishuRenderedMessage } from './types.js';
-import { getFeishuUploadKey } from './buffers.js';
 
 interface FeishuCreateMessageResult {
   code?: number;
@@ -37,6 +37,9 @@ interface DeliveryState {
   pages: DeliveredPage[];
   budget: FeishuCardBudget;
   work: Promise<unknown>;
+  pending: number;
+  failed: boolean;
+  lastUsed: number;
   titleUuid: string;
   titleMessageId?: string;
 }
@@ -49,6 +52,28 @@ interface ClientDeliveryState {
 
 const deliveriesByClient = new WeakMap<object, ClientDeliveryState>();
 const MAX_TRACKED_ROOTS = 256;
+const DELIVERY_IDLE_TTL_MS = 30 * 60 * 1000;
+
+/** Bound strong references without evicting queued or running work. Prefer completed
+ * deliveries over partial failures, whose UUIDs are needed for a subsequent retry. */
+function pruneDeliveries(states: ClientDeliveryState, protectedState?: DeliveryState): void {
+  const tracked = new Set([...states.roots.values(), ...states.deliveries.values()]);
+  const idle = [...tracked].filter((state) => state !== protectedState && state.pending === 0);
+  idle.sort((a, b) => Number(a.failed) - Number(b.failed) || a.lastUsed - b.lastUsed);
+  const remove = (state: DeliveryState): void => {
+    for (const [key, value] of states.roots) if (value === state) states.roots.delete(key);
+    for (const [key, value] of states.deliveries)
+      if (value === state) states.deliveries.delete(key);
+    tracked.delete(state);
+  };
+  for (const state of idle) {
+    if (Date.now() - state.lastUsed >= DELIVERY_IDLE_TTL_MS) remove(state);
+  }
+  for (const state of idle) {
+    if (tracked.size <= MAX_TRACKED_ROOTS) break;
+    if (tracked.has(state)) remove(state);
+  }
+}
 
 function clientDeliveryState(client: Client): ClientDeliveryState {
   let state = deliveriesByClient.get(client);
@@ -64,46 +89,72 @@ function newDeliveryState(client: Client): DeliveryState {
     pages: [],
     budget: getFeishuCardBudget(client),
     work: Promise.resolve(),
+    pending: 0,
+    failed: false,
+    lastUsed: Date.now(),
     titleUuid: randomUUID(),
   };
 }
 
 function deliveryState(client: Client, identity: object, deliveryId?: string): DeliveryState {
   const states = clientDeliveryState(client);
-  let state = deliveryId === undefined
-    ? states.objects.get(identity)
-    : states.deliveries.get(deliveryId);
+  pruneDeliveries(states);
+  let state =
+    deliveryId === undefined ? states.objects.get(identity) : states.deliveries.get(deliveryId);
   if (!state) {
     state = newDeliveryState(client);
     if (deliveryId === undefined) states.objects.set(identity, state);
     else states.deliveries.set(deliveryId, state);
   }
+  state.lastUsed = Date.now();
+  pruneDeliveries(states, state);
   return state;
 }
 
 function rememberDelivery(client: Client, state: DeliveryState): void {
-  const root = state.pages[0]?.messageId;
-  if (!root) return;
-  const roots = clientDeliveryState(client).roots;
-  roots.delete(root);
-  roots.set(root, state);
-  while (roots.size > MAX_TRACKED_ROOTS) {
-    const oldest = roots.keys().next().value;
-    if (oldest === undefined) break;
-    roots.delete(oldest);
+  const states = clientDeliveryState(client);
+  for (const root of [state.titleMessageId, state.pages[0]?.messageId]) {
+    if (!root) continue;
+    states.roots.delete(root);
+    states.roots.set(root, state);
   }
+  state.lastUsed = Date.now();
+  pruneDeliveries(states, state);
 }
 
 /** Includes the root and every individually confirmed overflow, even after partial failure. */
 export function getFeishuMessageIds(client: Client, root: string): string[] {
   const state = clientDeliveryState(client).roots.get(root);
   return state
-    ? state.pages.flatMap((page) => page.messageId ? [page.messageId] : [])
-    : root ? [root] : [];
+    ? [
+        ...(root === state.titleMessageId ? [root] : []),
+        ...state.pages.flatMap((page) => (page.messageId ? [page.messageId] : [])),
+      ]
+    : root
+      ? [root]
+      : [];
 }
 
 function serializeDelivery<T>(state: DeliveryState, action: () => Promise<T>): Promise<T> {
-  const work = state.work.catch(() => undefined).then(action);
+  // Count queued operations too: cache pressure must not split one active turn.
+  state.pending++;
+  const work = state.work
+    .catch(() => undefined)
+    .then(action)
+    .then(
+      (value) => {
+        state.failed = false;
+        return value;
+      },
+      (error: unknown) => {
+        state.failed = true;
+        throw error;
+      },
+    )
+    .finally(() => {
+      state.pending--;
+      state.lastUsed = Date.now();
+    });
   state.work = work;
   return work;
 }
@@ -123,9 +174,11 @@ function isThreadReplyUnsupported(err: unknown): boolean {
 
 function cardForMessage(message: FeishuRenderedMessage): CardObject {
   const raw = message.text ? message.text : markdownToFeishu(message.html ?? '');
-  return JSON.parse(message.feishuElements
-    ? buildStructuredCardForMessage(message)
-    : buildPlainCard(raw, message.feishuButtons ?? message.buttons, message.feishuHeader));
+  return JSON.parse(
+    message.feishuElements
+      ? buildStructuredCardForMessage(message)
+      : buildPlainCard(raw, message.feishuButtons ?? message.buttons, message.feishuHeader),
+  );
 }
 
 /** Every interactive SDK boundary checks the complete, final serialized card. */
@@ -136,10 +189,12 @@ async function patchCard(
   budget: FeishuCardBudget,
 ): Promise<void> {
   assertFeishuCardBudget(content, budget);
-  checkedFeishuResult(await client.im.message.patch({
-    path: { message_id: messageId },
-    data: { content },
-  }));
+  checkedFeishuResult(
+    await client.im.message.patch({
+      path: { message_id: messageId },
+      data: { content },
+    }),
+  );
 }
 
 async function deliverCards(
@@ -150,23 +205,36 @@ async function deliverCards(
 ): Promise<string> {
   const card = cardForMessage(message);
   let reductions = 0;
+  let replanFrom = Number.POSITIVE_INFINITY;
+  let failedIndex = 0;
   for (;;) {
     try {
-      const previous = state.pages.flatMap((page) => page.plan ? [page.plan] : []);
+      const previous = state.pages.flatMap((page, index) =>
+        page.plan ? [{ ...page.plan, sealed: page.plan.sealed && index < replanFrom }] : [],
+      );
       const plans = planFeishuCards(card, state.budget, previous);
+      // Empty sealed slots preserve indices in the middle, but a removed tail
+      // must be withdrawn rather than kept as indefinitely blank overflow cards.
+      while (plans.length > 1 && plans[plans.length - 1].slices.length === 0) plans.pop();
       for (let index = 0; index < plans.length; index++) {
+        failedIndex = index;
         const plan = plans[index];
         const page = state.pages[index] ?? { uuid: randomUUID() };
         // Persist the UUID before the request: retries after lost responses are idempotent.
         state.pages[index] = page;
         if (page.messageId) {
           if (page.plan?.content !== plan.content) {
-            await patchCard(client, page.messageId, plan.content, state.budget);
+            await patchCard(client, page.messageId, plan.content, plan.budget ?? state.budget);
           }
         } else {
           const result = await sendMessageContent(
-            client, message, 'interactive', plan.content, page.uuid,
-            state.budget, allowReplyFallback,
+            client,
+            message,
+            'interactive',
+            plan.content,
+            page.uuid,
+            plan.budget ?? state.budget,
+            allowReplyFallback,
           );
           const id = result?.data?.message_id;
           if (!id) throw new Error('Feishu card send returned no message_id');
@@ -180,16 +248,23 @@ async function deliverCards(
       for (let index = state.pages.length - 1; index >= plans.length; index--) {
         const page = state.pages[index];
         if (page.messageId) {
-          checkedFeishuResult(await client.im.message.delete({
-            path: { message_id: page.messageId },
-          }));
+          checkedFeishuResult(
+            await client.im.message.delete({
+              path: { message_id: page.messageId },
+            }),
+          );
         }
         state.pages.splice(index, 1);
         rememberDelivery(client, state);
       }
       return state.pages[0].messageId!;
     } catch (err) {
-      if (!isFeishuCardLimitError(err) || reductions >= 2) throw err;
+      // A planner envelope/continuation can itself exceed the final serialization
+      // limit. Replan before touching the SDK, under the same bounded retry policy.
+      const localLimit =
+        err instanceof Error && err.message.startsWith('Feishu card cannot fit budget:');
+      if ((!isFeishuCardLimitError(err) && !localLimit) || reductions >= 2) throw err;
+      replanFrom = Math.min(replanFrom, failedIndex);
       state.budget = lowerBudget(state.budget);
       reductions++;
     }
@@ -230,6 +305,7 @@ export async function editFeishuMessage(
 ): Promise<void> {
   if (!client) return;
   const states = clientDeliveryState(client);
+  pruneDeliveries(states);
   let state = states.roots.get(messageId);
   if (!state) {
     state = newDeliveryState(client);
@@ -260,15 +336,22 @@ async function startThread(
   state: DeliveryState,
 ): Promise<ThreadStartResult | null> {
   try {
-    const replyMessageId = await deliverCards(client, state, {
-      chatId: options.chatId,
-      text: options.text,
-      replyToMessageId: options.messageId,
-      replyInThread: true,
-    }, false);
+    const replyMessageId = await deliverCards(
+      client,
+      state,
+      {
+        chatId: options.chatId,
+        text: options.text,
+        replyToMessageId: options.messageId,
+        replyInThread: true,
+      },
+      false,
+    );
     const threadId = state.pages[0]?.threadId;
     if (!threadId) {
-      console.warn(`[feishu] startThreadFromMessage returned no thread_id for chat=${options.chatId.slice(-8)}`);
+      console.warn(
+        `[feishu] startThreadFromMessage returned no thread_id for chat=${options.chatId.slice(-8)}`,
+      );
       return null;
     }
     if (options.autoPinTopics) {
@@ -307,9 +390,15 @@ export async function startFeishuThreadWithTitle(
   return serializeDelivery(state, async () => {
     if (!state.titleMessageId) {
       try {
-        const root = await sendMessageContent(client, { chatId: options.chatId }, 'text',
-          JSON.stringify({ text: options.title }), state.titleUuid);
+        const root = await sendMessageContent(
+          client,
+          { chatId: options.chatId },
+          'text',
+          JSON.stringify({ text: options.title }),
+          state.titleUuid,
+        );
         state.titleMessageId = root?.data?.message_id;
+        rememberDelivery(client, state);
       } catch (err) {
         throw options.classifyError(err);
       }
@@ -333,15 +422,17 @@ export async function publishFeishuTopicMetadata(
   return serializeDelivery(state, async () => {
     try {
       if (!state.titleMessageId) {
-        const result = checkedFeishuResult(await client.im.message.reply({
-          path: { message_id: options.rootMessageId },
-          data: {
-            msg_type: 'post',
-            content: buildTopicMetadataPost(options.text),
-            reply_in_thread: true,
-            uuid: state.titleUuid,
-          },
-        })) as FeishuCreateMessageResult;
+        const result = checkedFeishuResult(
+          await client.im.message.reply({
+            path: { message_id: options.rootMessageId },
+            data: {
+              msg_type: 'post',
+              content: buildTopicMetadataPost(options.text),
+              reply_in_thread: true,
+              uuid: state.titleUuid,
+            },
+          }),
+        ) as FeishuCreateMessageResult;
         state.titleMessageId = result?.data?.message_id;
       }
       if (!state.titleMessageId) return null;
@@ -362,7 +453,9 @@ function buildTopicMetadataPost(text: string): string {
   return JSON.stringify({
     zh_cn: {
       title: 'TLive 会话索引',
-      content: [[{ tag: 'a', text: 'TLive 会话索引', href: `https://tlive.local/session#${marker}` }]],
+      content: [
+        [{ tag: 'a', text: 'TLive 会话索引', href: `https://tlive.local/session#${marker}` }],
+      ],
     },
   });
 }
@@ -395,7 +488,7 @@ function buildPlainCard(
   header?: { template: string; title: string },
 ): string {
   const elements: FeishuCardElement[] = [
-    { tag: 'markdown', content: downgradeHeadings(splitLargeTables(text)) },
+    { tag: 'markdown', content: downgradeHeadings(text) },
     ...buildFeishuButtonElements(buttons),
   ];
   return buildFeishuCard({ header: header as any, elements });
@@ -410,16 +503,23 @@ async function sendMediaMessage(
   if (!media) throw new Error('No media attachment');
   const buffer = await mediaBuffer(media);
   const image = media.type === 'image';
-  const uploadResult = checkedFeishuResult(image
-    ? await client.im.image.create({ data: { image_type: 'message', image: buffer as any } })
-    : await client.im.file.create({
-      data: { file_type: 'stream', file_name: media.filename || 'file', file: buffer as any },
-    }));
+  const uploadResult = checkedFeishuResult(
+    image
+      ? await client.im.image.create({ data: { image_type: 'message', image: buffer as any } })
+      : await client.im.file.create({
+          data: { file_type: 'stream', file_name: media.filename || 'file', file: buffer as any },
+        }),
+  );
   const keyName = image ? 'image_key' : 'file_key';
   const key = getFeishuUploadKey(uploadResult, keyName);
   if (!key) throw new Error(`Feishu upload returned no ${keyName}`);
-  const result = await sendMessageContent(client, message, image ? 'image' : 'file',
-    JSON.stringify({ [keyName]: key }), uuid);
+  const result = await sendMessageContent(
+    client,
+    message,
+    image ? 'image' : 'file',
+    JSON.stringify({ [keyName]: key }),
+    uuid,
+  );
   const id = result?.data?.message_id;
   if (!id) throw new Error('Feishu media send returned no message_id');
   return { messageId: String(id), success: true };
@@ -448,31 +548,47 @@ async function sendMessageContent(
   const idType = message.receiveIdType || 'chat_id';
   if (message.replyToMessageId && message.replyInThread) {
     try {
-      return checkedFeishuResult(await client.im.message.reply({
-        path: { message_id: message.replyToMessageId },
-        data: { msg_type: msgType, content, reply_in_thread: true, uuid },
-      })) as FeishuCreateMessageResult;
+      return checkedFeishuResult(
+        await client.im.message.reply({
+          path: { message_id: message.replyToMessageId },
+          data: { msg_type: msgType, content, reply_in_thread: true, uuid },
+        }),
+      ) as FeishuCreateMessageResult;
     } catch (replyErr) {
-      if (!allowReplyFallback || (!isThreadReplyUnsupported(replyErr) && !isMissingReplyTarget(replyErr))) {
+      if (
+        !allowReplyFallback ||
+        (!isThreadReplyUnsupported(replyErr) && !isMissingReplyTarget(replyErr))
+      ) {
         throw replyErr;
       }
-      console.warn(`[feishu] reply_in_thread failed (${errorCode(replyErr)}), falling back to chat send`);
+      console.warn(
+        `[feishu] reply_in_thread failed (${errorCode(replyErr)}), falling back to chat send`,
+      );
     }
   }
   const data: Record<string, unknown> = {
-    receive_id: message.chatId, msg_type: msgType, content, uuid,
+    receive_id: message.chatId,
+    msg_type: msgType,
+    content,
+    uuid,
   };
   if (message.replyToMessageId) data.root_id = message.replyToMessageId;
   try {
-    return checkedFeishuResult(await client.im.message.create({
-      params: { receive_id_type: idType as any }, data: data as any,
-    })) as FeishuCreateMessageResult;
+    return checkedFeishuResult(
+      await client.im.message.create({
+        params: { receive_id_type: idType as any },
+        data: data as any,
+      }),
+    ) as FeishuCreateMessageResult;
   } catch (createErr) {
     if (message.replyToMessageId && isMissingReplyTarget(createErr)) {
-      delete data.root_id;
-      return checkedFeishuResult(await client.im.message.create({
-        params: { receive_id_type: idType as any }, data: data as any,
-      })) as FeishuCreateMessageResult;
+      const { root_id: _rootId, ...fallbackData } = data;
+      return checkedFeishuResult(
+        await client.im.message.create({
+          params: { receive_id_type: idType as any },
+          data: fallbackData as any,
+        }),
+      ) as FeishuCreateMessageResult;
     }
     throw createErr;
   }

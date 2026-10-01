@@ -32,6 +32,8 @@ export type FlowTimelineEntry = NonNullable<ProgressData['timeline']>[number] & 
   status?: FlowStatus;
   detailId?: string;
   tokenCount?: number;
+  exactTokenCount?: number;
+  exacttokenCount?: number;
 };
 
 export interface FlowTextBlock {
@@ -49,6 +51,7 @@ export interface FlowToolBlock extends ToolDisplayCall {
 }
 
 export interface FlowToolGroup {
+  id: string;
   kind: 'tool_group';
   category: ToolDisplayCategory;
   children: Array<FlowTextBlock | FlowToolBlock>;
@@ -67,7 +70,10 @@ function validCount(count: number | undefined): count is number {
   return count !== undefined && Number.isFinite(count) && count >= 0;
 }
 
-export function countFlowGapTokens(blocks: readonly FlowTextBlock[], options: FlowOptions = {}): number {
+export function countFlowGapTokens(
+  blocks: readonly FlowTextBlock[],
+  options: FlowOptions = {},
+): number {
   if (blocks.every((block) => validCount(block.tokenCount))) {
     return blocks.reduce((sum, block) => sum + (block.tokenCount ?? 0), 0);
   }
@@ -94,7 +100,9 @@ export function progressBodyWithoutMetadata(data: ProgressData): string {
 
 function terminalStatus(data: ProgressData): FlowStatus {
   return data.phase === 'failed'
-    ? data.errorMessage === 'Interrupted' ? 'interrupted' : 'failed'
+    ? data.errorMessage === 'Interrupted'
+      ? 'interrupted'
+      : 'failed'
     : 'completed';
 }
 
@@ -103,7 +111,16 @@ function entriesForData(data: ProgressData): FlowTimelineEntry[] {
   const entries: FlowTimelineEntry[] = [];
   if (data.thinkingText?.trim()) entries.push({ kind: 'thinking', text: data.thinkingText });
   for (const log of data.toolLogs ?? []) {
-    entries.push({ kind: 'tool', toolName: log.name, toolInput: log.input, toolResult: log.result, isError: log.isError });
+    entries.push({
+      kind: 'tool',
+      toolName: log.name,
+      toolInput: log.input,
+      toolResult: log.result,
+      toolId: log.toolId,
+      inputData: log.inputData,
+      status: log.status,
+      isError: log.isError,
+    });
   }
   return entries;
 }
@@ -116,13 +133,18 @@ export function collectFlowItems(
   const items: Array<FlowTextBlock | FlowToolBlock> = [];
   const toolById = new Map<string, FlowToolBlock>();
   const entries = entriesForData(data);
+  let legacyCalls = 0;
+  let textBlocks = 0;
   for (let index = 0; index < entries.length; index++) {
     const entry = entries[index];
     if (entry.kind === 'tool') {
       const existing = entry.toolId ? toolById.get(entry.toolId) : undefined;
       if (!entry.toolName && !existing) continue;
-      const inferredStatus = entry.isError ? 'failed'
-        : entry.toolResult !== undefined ? 'completed' : 'running';
+      const inferredStatus = entry.isError
+        ? 'failed'
+        : entry.toolResult !== undefined
+          ? 'completed'
+          : 'running';
       const status = entry.status ?? inferredStatus;
       if (existing) {
         if (entry.toolInput !== undefined) existing.toolInput = entry.toolInput;
@@ -136,7 +158,7 @@ export function collectFlowItems(
       const tool: FlowToolBlock = {
         kind: 'tool',
         // ID-less old payloads are distinct calls; never guess identity from identical input.
-        id: entry.toolId ?? `legacy-call:${index}`,
+        id: entry.toolId ?? `legacy-call:${legacyCalls++}`,
         toolName: entry.toolName ?? '',
         toolInput: entry.toolInput ?? '',
         inputData: entry.inputData,
@@ -147,17 +169,26 @@ export function collectFlowItems(
       };
       if (entry.toolId) toolById.set(entry.toolId, tool);
       items.push(tool);
-    } else if (entry.text !== undefined && entry.text.length) {
+    } else if (entry.text?.length) {
       const previous = items[items.length - 1];
       const status = entry.status ?? 'completed';
+      const exactCount = entry.exactTokenCount ?? entry.exacttokenCount ?? entry.tokenCount;
       // Adjacent chunks are one semantic block: no inserted spaces or per-packet rounding.
       if (previous && previous.kind === entry.kind) {
         previous.text += entry.text;
         previous.status = status;
-        previous.tokenCount = validCount(previous.tokenCount) && validCount(entry.tokenCount)
-          ? previous.tokenCount + entry.tokenCount : undefined;
+        previous.tokenCount =
+          validCount(previous.tokenCount) && validCount(exactCount)
+            ? previous.tokenCount + exactCount
+            : undefined;
       } else {
-        items.push({ id: entry.blockId ?? `text:${index}`, kind: entry.kind, text: entry.text, status, tokenCount: validCount(entry.tokenCount) ? entry.tokenCount : undefined });
+        items.push({
+          id: entry.blockId ?? `text:${textBlocks++}`,
+          kind: entry.kind,
+          text: entry.text,
+          status,
+          tokenCount: validCount(exactCount) ? exactCount : undefined,
+        });
       }
     }
   }
@@ -166,13 +197,20 @@ export function collectFlowItems(
   // must not be replayed via renderedText (which includes all preceding model narration).
   const body = progressBodyWithoutMetadata(data);
   if (!items.some((item) => item.kind === 'text') && body) {
-    items.push({ id: 'fallback-body', kind: 'text', text: body, status: isFlowTerminal(data) ? terminalStatus(data) : 'running' });
+    items.push({
+      id: 'fallback-body',
+      kind: 'text',
+      text: body,
+      status: isFlowTerminal(data) ? terminalStatus(data) : 'running',
+    });
   }
 
   for (let index = 0; index < items.length; index++) {
     const item = items[index];
     if (item.kind === 'tool') {
       if (isFlowTerminal(data) && item.status === 'running') item.status = terminalStatus(data);
+    } else if (isFlowTerminal(data) && item.status === 'running') {
+      item.status = terminalStatus(data);
     } else if (item.kind === 'thinking') {
       const isLatest = index === items.length - 1;
       const lastEntry = entries[entries.length - 1];
@@ -213,19 +251,33 @@ export function buildFlowBlocks(data: ProgressData, options: FlowOptions = {}): 
       else blocks.push(item);
       continue;
     }
-    if (group && group.category === item.category && countFlowGapTokens(pending, options) <= maxGap) {
+    if (
+      group &&
+      group.category === item.category &&
+      countFlowGapTokens(pending, options) <= maxGap
+    ) {
       group.children.push(...pending, item);
     } else {
       finishGroup();
       blocks.push(...pending);
-      group = { kind: 'tool_group', category: item.category, children: [item], expanded: false };
+      group = {
+        id: `group:${item.id}`,
+        kind: 'tool_group',
+        category: item.category,
+        children: [item],
+        expanded: false,
+      };
     }
     pending = [];
   }
   // Trailing model output is never folded just because a tool preceded it. A short, active
   // trailing thought may live in the group; its parent must remain expanded while thinking.
-  if (group && pending.length && pending.every((block) => block.kind === 'thinking')
-    && countFlowGapTokens(pending, options) <= maxGap) {
+  if (
+    group &&
+    pending.length &&
+    pending.every((block) => block.kind === 'thinking') &&
+    countFlowGapTokens(pending, options) <= maxGap
+  ) {
     group.children.push(...pending);
     pending = [];
   }

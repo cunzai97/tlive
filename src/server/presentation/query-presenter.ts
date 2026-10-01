@@ -81,7 +81,11 @@ export class QueryExecutionPresenter {
             completedTraceOnly: true,
           },
         });
-        const traceOutMsg = { ...withInboundReplyContext(traceMsg, this.inbound), flowDetailUserId: this.inbound.userId, deliveryId: state.turnId };
+        const traceOutMsg = {
+          ...withInboundReplyContext(traceMsg, this.inbound),
+          flowDetailUserId: this.inbound.userId,
+          deliveryId: state.turnId,
+        };
         if (isEdit) {
           await this.editExistingOrSend(traceOutMsg);
         } else {
@@ -95,7 +99,10 @@ export class QueryExecutionPresenter {
           chatId: this.inbound.chatId,
           data: this.buildTaskSummary(state),
         });
-        await this.adapter.send({ ...withInboundReplyContext(summaryMsg, this.inbound), deliveryId: state.turnId ? `${state.turnId}:answer` : undefined });
+        await this.adapter.send({
+          ...withInboundReplyContext(summaryMsg, this.inbound),
+          deliveryId: state.turnId ? `${state.turnId}:answer` : undefined,
+        });
         return;
       }
 
@@ -107,7 +114,11 @@ export class QueryExecutionPresenter {
     } else {
       outMsg = this.adapter.formatContent(this.inbound.chatId, content, castButtons(buttons));
     }
-    outMsg = { ...withInboundReplyContext(outMsg, this.inbound), flowDetailUserId: this.inbound.userId, deliveryId: state?.turnId };
+    outMsg = {
+      ...withInboundReplyContext(outMsg, this.inbound),
+      flowDetailUserId: this.inbound.userId,
+      deliveryId: state?.turnId,
+    };
 
     if (!isEdit) {
       const result = await this.adapter.send(outMsg);
@@ -166,7 +177,10 @@ export class QueryExecutionPresenter {
       await this.adapter.editMessage(this.inbound.chatId, this.getMessageId()!, message);
       return;
     } catch (err: any) {
-      if (err?.retryable) throw err;
+      // Feishu owns a possibly partially committed multi-card delivery. A format/auth
+      // failure must not create a second logical stream and duplicate its successful pages.
+      if (this.adapter.channelType === 'feishu' || err?.retryable) throw err;
+      // Other channels retain their legacy edit-to-send fallback.
       // 编辑失败，尝试发送新消息
       try {
         const result = await this.adapter.send(message);
