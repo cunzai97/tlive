@@ -4,7 +4,7 @@
 
 - 独立工作区：`/home/pan/work/tlive-card-first-thinking`。
 - 分支：`fix/first-thinking-card`；基线：`794a225`。
-- 当前运行仍在原生流式工作区 `/home/pan/work/tlive-card-native-streaming`；本修复未部署，未覆盖其 dist、未重启任何进程。
+- 用户确认后已仅切换桥接到本修复；原生流式工作区 `/home/pan/work/tlive-card-native-streaming` 及其 dist 保留作为回退，原客户端未重启。
 
 ## 已复现的问题
 
@@ -29,4 +29,12 @@
 - `npm run check`：typecheck、lint、全量 82 文件 / 801 项通过。
 - `npm run test:coverage`：82 文件 / 801 项通过。
 - `npm run build`、`node --check dist/main.mjs`、`git diff --check` 通过。
-- 手机出卡时机、手动折叠保持仍待授权切换后由新任务验收；以上不是平台视觉验证。
+- 手机出卡时机、手动折叠保持仍待用户用新任务验收；以上自动化结果不是平台视觉验证。
+
+## 已授权运行切换
+
+- 代码提交 `d7dc1dd`；仅核实并 SIGTERM 原 bridge PID `892748`，以修复工作区 CLI `start --standalone` 独立启动。
+- 新 bridge PID `909569`，fresh status readyAt `2026-10-01T02:41:35.114Z`；新日志已确认飞书 ws 就绪及相同 local 客户端重新注册。
+- 原 client PID `793041` 的命令行与工作目录保持不变；`TL_FS_CARD_FLOW=blocks`、`TL_FS_NATIVE_STREAMING=true` 已从新进程环境读回确认，桥接没有代理变量。
+- systemd unit 均未激活，文件哈希及默认 CLI 路径/内容均未改变；旧工作区和 dist 未覆盖。
+- 运行记录：`/home/pan/.tlive/runtime/card-first-thinking-trial.json`。旧详情快照因桥接重启失效，需新任务进行视觉与按钮验收。
