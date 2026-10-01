@@ -26,4 +26,12 @@
 
 ## 部署
 
-待按用户此次请求独立切换，仅重启桥接，保留原客户端，启动后读回环境、fresh status、飞书 ws 与客户端重新注册。真实限流改善仍需新任务验收。
+已按用户此次请求独立切换，仅重启桥接，原客户端保持 PID `793041`。
+
+- 运行代码：`d26a017640d490ab6e1e08785caf5bae2bb6640a`。
+- 旧 bridge PID `962178` 已正常退出，新 bridge PID `981267`，工作目录与命令行均核实为 400ms 工作区及其 dist。
+- fresh status readyAt：`2026-10-01T03:50:59.216Z`；新增日志确认飞书 ws 就绪、Bridge started 与原 local 客户端重新注册。
+- 从新进程读回 `TL_FS_NATIVE_STREAMING=false`、`TL_FS_CARD_FLOW=blocks`；桥接无代理。systemd unit 与默认 CLI 启动前后哈希/路径不变。
+- 构建产物 SHA-256：`ea7a2426accb925a0ec9bdd4adf326aaa0dfa7776c675deba5811c7601196a10`。
+- 记录：`/home/pan/.tlive/runtime/card-snapshot-400ms-trial.json`；回退工作区为原 200ms 版，原 dist 未改。
+- 真实限流改善仍需新任务验收；此次没有实现滚动，也未偷偷删除或截短思考。
