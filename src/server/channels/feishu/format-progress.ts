@@ -4,7 +4,9 @@ import { t } from '../../../shared/i18n/index.js';
 import type { ProgressData } from '../../../shared/formatting/message-types.js';
 import { truncate } from '../../../shared/core/string.js';
 import type { FeishuCardElement } from './card-builder.js';
-import { collapsiblePanel, markdownElement } from './card-elements.js';
+import { buttonElements, collapsiblePanel, markdownElement } from './card-elements.js';
+import { redactSensitiveContent } from '../../../shared/utils/content-filter.js';
+import { FEISHU_THINKING_PREVIEW_TOKENS, thinkingTail, type ThinkingPreview } from './thinking-preview.js';
 import {
   buildProgressTimelineElements as buildLegacyTimelineElements,
   buildProgressContentElements as buildLegacyContentElements,
@@ -15,6 +17,7 @@ import {
   isFlowTerminal,
   type FlowOptions,
   type FlowTextBlock,
+  type FlowBlock,
 } from './flow-blocks.js';
 import {
   createDefaultToolDisplayRegistry,
@@ -31,6 +34,8 @@ export interface FormatProgressParams {
   md: (content: string) => FeishuCardElement;
   locale: Locale;
   flowOptions?: FlowOptions;
+  /** Register the full semantic block before removing history from the serialized card. */
+  registerThinkingDetails?: (block: FlowTextBlock) => string | undefined;
 }
 
 /** The exact semantic text IDs used by the block renderer, including nested thoughts. */
@@ -48,27 +53,79 @@ export function progressStreamingElementIds(
     .map((item) => flowElementId('text', item.id ?? item.kind));
 }
 
-function textElements(block: FlowTextBlock, params: FormatProgressParams): FeishuCardElement[] {
+interface ThinkingView extends ThinkingPreview {
+  detailId: string;
+}
+
+/** One 300-token estimate for all thought previews, newest first, not 300 per historic block. */
+function thinkingViews(blocks: FlowBlock[], params: FormatProgressParams): Map<FlowTextBlock, ThinkingView> {
+  const thoughts = blocks.flatMap(block => block.kind === 'tool_group'
+    ? block.children.filter((child): child is FlowTextBlock => child.kind === 'thinking')
+    : block.kind === 'thinking' ? [block] : []);
+  const detailIds = new Map<FlowTextBlock, string>();
+  for (const block of thoughts) {
+    const id = params.registerThinkingDetails?.(block);
+    if (id) detailIds.set(block, id);
+  }
+  const views = new Map<FlowTextBlock, ThinkingView>();
+  let remaining = FEISHU_THINKING_PREVIEW_TOKENS;
+  for (let index = thoughts.length - 1; index >= 0; index--) {
+    const block = thoughts[index];
+    const detailId = detailIds.get(block);
+    // Never silently discard content when full-detail retention is unavailable.
+    if (!detailId) continue;
+    // Redact BEFORE slicing: a tail cut through a credential must not defeat redaction.
+    const preview = thinkingTail(redactSensitiveContent(block.text), remaining);
+    remaining -= preview.tokens;
+    views.set(block, { ...preview, detailId });
+  }
+  return views;
+}
+
+function textElements(
+  block: FlowTextBlock,
+  params: FormatProgressParams,
+  views: Map<FlowTextBlock, ThinkingView>,
+): FeishuCardElement[] {
   if (!block.text.trim()) return [];
   const identity = block.id ?? block.kind;
-  const text = { ...params.md(block.text), element_id: flowElementId('text', identity) };
-  if (block.kind === 'text') return [text];
-  return [
-    {
-      ...collapsiblePanel(
-        `${flowStatusLabel(block.status, params.locale)} · ${t('progress.labelThinkingProcess', params.locale)}`,
-        [text],
-        { expanded: block.status === 'running' },
-      ),
-      element_id: flowElementId('thinking', identity),
-    },
-  ];
+  const view = views.get(block);
+  const children: FeishuCardElement[] = [];
+  if (!view || view.text) {
+    children.push({ ...params.md(view?.text ?? block.text), element_id: flowElementId('text', identity) });
+  }
+  if (block.kind === 'text') return children;
+  if (!view && params.registerThinkingDetails) {
+    children.push(params.md(params.locale === 'zh'
+      ? '完整思考详情暂不可用；为避免丢失内容，此处保留全文。'
+      : 'Full thinking details are unavailable; retaining the complete text here.'));
+  }
+  if (view?.omitted) {
+    children.push(params.md(params.locale === 'zh'
+      ? view.text ? '仅显示最近约 300 Token；较早内容请查看完整思考。' : '较早思考已移至详情，不占主卡正文空间。'
+      : view.text ? 'Latest ~300 estimated tokens only; earlier thoughts are in details.' : 'Earlier thoughts are available in details.'));
+  }
+  if (view) {
+    children.push(...buttonElements([{
+      label: params.locale === 'zh' ? '查看完整思考' : 'View full thinking',
+      callbackData: `flow_detail:open:${view.detailId}`,
+    }]));
+  }
+  return [{
+    ...collapsiblePanel(
+      `${flowStatusLabel(block.status, params.locale)} · ${t('progress.labelThinkingProcess', params.locale)}`,
+      children,
+      { expanded: block.status === 'running' },
+    ),
+    element_id: flowElementId('thinking', identity),
+  }];
 }
 
 export function buildProgressTimelineElements(params: FormatProgressParams): FeishuCardElement[] {
   if (params.flowOptions?.mode === 'legacy') return buildLegacyTimelineElements(params);
   const registry = params.flowOptions?.registry ?? createDefaultToolDisplayRegistry();
   const blocks = buildFlowBlocks(params.data, { ...params.flowOptions, registry });
+  const views = thinkingViews(blocks, params);
   const elements: FeishuCardElement[] = [];
   const categoryNames =
     params.locale === 'zh'
@@ -81,7 +138,7 @@ export function buildProgressTimelineElements(params: FormatProgressParams): Fei
         };
   for (const block of blocks) {
     if (block.kind !== 'tool_group') {
-      elements.push(...textElements(block, params));
+      elements.push(...textElements(block, params, views));
       continue;
     }
     const children: FeishuCardElement[] = [];
@@ -93,7 +150,7 @@ export function buildProgressTimelineElements(params: FormatProgressParams): Fei
         children.push(...display.elements);
         if (display.failureSummary) failures.push({ id: child.id, text: display.failureSummary });
       } else {
-        children.push(...textElements(child, params));
+        children.push(...textElements(child, params, views));
       }
     }
     const status = block.children.some((child) => child.status === 'failed')

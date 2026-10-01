@@ -95,8 +95,8 @@ describe('Feishu block-flow integration at the mocked SDK boundary', () => {
       replyToMessageId: 'source', deliveryId: 'turn',
     });
     expect(result.success).toBe(true);
-    const [sourceId, sourceCard] = [...cards.entries()].find(([, card]) => actions(JSON.parse(card)).some((action) => action.startsWith('flow_detail:open:')))!;
-    const open = actions(JSON.parse(sourceCard)).find((action) => action.startsWith('flow_detail:open:'))!;
+    const [sourceId, sourceCard] = [...cards.entries()].find(([, card]) => card.includes('查看改动'))!;
+    const open = actions(JSON.parse(sourceCard)).filter((action) => action.startsWith('flow_detail:open:')).at(-1)!;
     const before = cards.size;
     expect(await trigger(open, sourceId)).toMatchObject({ toast: { type: 'success' } });
     expect(cards.size).toBe(before + 1);

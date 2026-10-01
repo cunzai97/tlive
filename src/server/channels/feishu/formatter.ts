@@ -427,6 +427,15 @@ export class FeishuFormatter implements MessageFormatter<FeishuRenderedMessage> 
         md: this.md.bind(this),
         locale: this.locale,
         flowOptions: this.options.flowOptions,
+        registerThinkingDetails: this.options.toolDetails ? block => {
+          // The renderer supplies a fresh, local turn UUID; legacy IDs alone can collide.
+          if (!data.turnId || !block.id) return undefined;
+          return this.options.toolDetails!.registerThinking(chatId, {
+            thinkingId: `${data.turnId}:${block.id}`,
+            text: block.text,
+            status: block.status,
+          });
+        } : undefined,
       }),
     );
 

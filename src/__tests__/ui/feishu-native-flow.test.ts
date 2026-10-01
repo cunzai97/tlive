@@ -229,9 +229,10 @@ describe('native flow on the real Feishu presentation/sender path', () => {
       turn.renderer.onToolStart('write', { path: '/tmp/native-test.txt', content: '快照内容' }, 'write-call');
       turn.renderer.onToolResult('write-call', 'written', false);
       await vi.advanceTimersByTimeAsync(3000);
-      const source = [...messages.keys()].find((id) => callbackActions(remoteMessage(id)).some((action) => action.startsWith('flow_detail:open:')))!;
+      const source = [...messages.keys()].find((id) => nodes(remoteMessage(id)).some((node) => node.tag === 'button' && node.text?.content === '查看新增内容'))!;
       expect(source).toBeTruthy();
-      const open = callbackActions(remoteMessage(source)).find((action) => action.startsWith('flow_detail:open:'))!;
+      const button = nodes(remoteMessage(source)).find((node) => node.tag === 'button' && node.text?.content === '查看新增内容')!;
+      const open = button.behaviors[0].value.action;
       const response = await settle(sdk.handlers.get('card.action.trigger')!({
         operator: { user_id: 'owner' }, context: { open_chat_id: 'chat', open_message_id: source },
         action: { value: { action: open } },
@@ -477,6 +478,44 @@ describe('400ms latest-state snapshots without a typing animation', () => {
       await settle(turn.renderer.onComplete());
       expect(maxInflight).toBe(1);
       expect(sdk.imReply).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('keeps only the latest thought suffix on the real renderer path while retaining full scoped details', async () => {
+    await withSnapshotTurn(async (turn) => {
+      const first = 'OLD_THINKING_BEGIN' + '旧思考'.repeat(2000);
+      turn.renderer.onThinkingDelta(first);
+      await vi.advanceTimersByTimeAsync(0);
+      const source = [...messages.keys()][0];
+      expect(messages.size).toBe(1);
+      expect(messages.get(source)).not.toContain('OLD_THINKING_BEGIN');
+      const open = callbackActions(remoteMessage(source)).find(action => action.startsWith('flow_detail:open:'))!;
+      expect(open).toBeTruthy();
+      turn.renderer.onThinkingDelta('新的思考'.repeat(1200) + 'LATEST_THOUGHT_END');
+      await vi.advanceTimersByTimeAsync(400);
+      expect(messages.size).toBe(1);
+      const main = messages.get(source)!;
+      expect(main).toContain('LATEST_THOUGHT_END');
+      expect(main).not.toContain('旧思考'.repeat(50));
+      expect(callbackActions(remoteMessage(source))).toContain(open);
+      expect(Buffer.byteLength(main, 'utf8')).toBeLessThan(4000);
+      const invoke = (action: string, messageId: string) => sdk.handlers.get('card.action.trigger')!({
+        operator: { user_id: 'owner' },
+        context: { open_chat_id: 'chat', open_message_id: messageId },
+        action: { tag: 'button', value: { action } },
+      });
+      expect(await settle(invoke(open, source))).toMatchObject({ toast: { type: 'success' } });
+      const detailId = [...messages.keys()].find(id => id !== source)!;
+      expect(messages.get(detailId)).toContain('OLD_THINKING_BEGIN');
+      expect(messages.size).toBe(2);
+      const close = callbackActions(remoteMessage(detailId)).find(action => action.startsWith('flow_detail:close:'))!;
+      await settle(invoke(close, detailId));
+      expect([...messages.keys()]).toEqual([source]);
+      expect(messages.get(source)).toBe(main);
+      expect(await adapter.consumeOne()).toBeNull();
+      await settle(turn.renderer.onComplete());
+      expect(messages.get(source)).not.toContain('OLD_THINKING_BEGIN');
+      expect(sdk.cardCreate).not.toHaveBeenCalled();
     });
   });
 

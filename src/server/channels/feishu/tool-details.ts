@@ -32,6 +32,12 @@ export interface FeishuToolDetailEntry {
   isError?: boolean;
 }
 
+export interface FeishuThinkingDetailEntry {
+  thinkingId: string;
+  text: string;
+  status?: string;
+}
+
 export interface FeishuToolDetailsOptions {
   ttlMs?: number;
   maxEntries?: number;
@@ -60,7 +66,11 @@ interface Snapshot {
   readonly id: string;
   readonly key: string;
   readonly chatId: string;
-  readonly text: string;
+  readonly kind: 'tool' | 'thinking';
+  /** Immutable for tools; only the latest redacted full source for thinking. */
+  text: string;
+  /** Held separately until a confirmed close, including send retries. */
+  frozenText?: string;
   readonly outcome: Outcome;
   readonly expiresAt: number;
   openGeneration: number;
@@ -83,7 +93,7 @@ interface Action {
 
 const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}';
 const ACTION = new RegExp(`^flow_detail:(open|page|close):(${UUID})(?::(0|[1-9][0-9]{0,8}))?$`);
-const EXPIRED = '详情快照已过期或服务已重启；内存快照不可恢复，请查看原工具结果。';
+const EXPIRED = '详情快照已过期或服务已重启；内存快照不可恢复，请查看原卡片。';
 const DENIED = '无权操作此详情，或卡片的聊天、话题、来源消息不匹配。';
 
 function toast(type: 'success' | 'error', content: string): Record<string, unknown> {
@@ -335,6 +345,7 @@ export class FeishuToolDetails {
         id,
         key,
         chatId,
+        kind: 'tool',
         text,
         outcome: state,
         expiresAt: this.now() + this.ttlMs,
@@ -351,6 +362,56 @@ export class FeishuToolDetails {
     } catch {
       return undefined;
     }
+  }
+
+  /** Replace the live source, not its identity or an already-open browsing snapshot. */
+  registerThinking(chatId: string, entry: FeishuThinkingDetailEntry): string | undefined {
+    this.prune();
+    if (
+      this.disposed ||
+      !validIdentifier(chatId) ||
+      !validIdentifier(entry.thinkingId) ||
+      typeof entry.text !== 'string'
+    )
+      return undefined;
+    const key = `thinking:${createHash('sha256')
+      .update(canonicalJson({ chatId, thinkingId: entry.thinkingId }))
+      .digest('hex')}`;
+    const text = redactSensitiveContent(entry.text);
+    const textBytes = Buffer.byteLength(text, 'utf8');
+    const existingId = this.keys.get(key);
+    if (existingId) {
+      const snapshot = this.snapshots.get(existingId)!;
+      // Pending callbacks pin expired entries; never renew/rebind one while they finish.
+      if (snapshot.expiresAt <= this.now()) return undefined;
+      const extra = textBytes - Buffer.byteLength(snapshot.text, 'utf8');
+      if (extra > 0 && !this.reserve(extra, false, snapshot.id)) return undefined;
+      snapshot.text = text;
+      snapshot.bytes += extra;
+      this.retainedBytes += extra;
+      return snapshot.id;
+    }
+    const id = randomUUID();
+    const bytes = textBytes + Buffer.byteLength(id + key + chatId, 'utf8') + 640;
+    if (!this.reserve(bytes, true)) return undefined;
+    const snapshot: Snapshot = {
+      id,
+      key,
+      chatId,
+      kind: 'thinking',
+      text,
+      outcome: 'returned',
+      expiresAt: this.now() + this.ttlMs,
+      openGeneration: 0,
+      bytes,
+      sources: new Set(),
+      tail: Promise.resolve(),
+      pending: 0,
+    };
+    this.snapshots.set(id, snapshot);
+    this.keys.set(key, id);
+    this.retainedBytes += bytes;
+    return id;
   }
 
   bind(message: DetailMessage, messageIds: string[]): void {
@@ -380,14 +441,18 @@ export class FeishuToolDetails {
         continue;
       if (snapshot.scope && canonicalJson(snapshot.scope) !== canonicalJson(scope)) continue;
       const nextSources = new Set([...snapshot.sources, ...sources].slice(0, this.maxSources));
-      const pages = snapshot.pages ?? this.paginate(snapshot, scope);
-      if (!pages) continue;
+      // Thinking offsets are allocated only on open, against frozen text/client budgets.
+      const pages =
+        snapshot.pages ?? (snapshot.kind === 'tool' ? this.paginate(snapshot, scope) : undefined);
+      if (snapshot.kind === 'tool' && !pages) continue;
       const extra =
         Buffer.byteLength(
           [...nextSources].filter((source) => !snapshot.sources.has(source)).join(''),
           'utf8',
         ) +
-        (snapshot.scope ? 0 : Buffer.byteLength(canonicalJson(scope), 'utf8') + pages.length * 16);
+        (snapshot.scope
+          ? 0
+          : Buffer.byteLength(canonicalJson(scope), 'utf8') + (pages?.length ?? 0) * 16);
       if (!this.reserve(extra, false, snapshot.id)) continue;
       snapshot.scope ??= Object.freeze({ ...scope });
       snapshot.pages ??= pages;
@@ -460,7 +525,7 @@ export class FeishuToolDetails {
     const scope = snapshot.scope;
     if (
       !scope ||
-      !snapshot.pages ||
+      (snapshot.kind === 'tool' && !snapshot.pages) ||
       message.channelType !== 'feishu' ||
       message.chatId !== scope.chatId ||
       (message.threadId !== undefined && message.threadId !== scope.threadId) ||
@@ -488,7 +553,23 @@ export class FeishuToolDetails {
       if (snapshot.pageBudget && snapshot.pageBudget !== budgetKey) {
         throw new Error('Detail budget changed; refusing to reinterpret existing navigation');
       }
-      if (!snapshot.pageBudget) {
+      if (snapshot.kind === 'thinking') {
+        if (action.verb === 'open' && snapshot.frozenText === undefined) {
+          const text = snapshot.text;
+          const pages = this.paginate(snapshot, scope, budget, text);
+          if (!pages) throw new Error('Thinking detail cannot fit the configured card budget');
+          // Count both held contents even when the frozen text equals the live source.
+          const extra = Buffer.byteLength(text, 'utf8') + pages.length * 16;
+          if (!this.reserve(extra, false, snapshot.id)) {
+            throw new Error('Thinking browsing snapshot budget exhausted');
+          }
+          snapshot.frozenText = text;
+          snapshot.pages = pages;
+          snapshot.pageBudget = budgetKey;
+          snapshot.bytes += extra;
+          this.retainedBytes += extra;
+        }
+      } else if (!snapshot.pageBudget) {
         // bind has no client. Finalize offsets against the actual configured client
         // before sending, otherwise the shared sender could emit overflow cards.
         const pages = this.paginate(snapshot, scope, budget);
@@ -523,7 +604,7 @@ export class FeishuToolDetails {
     if (!detail) return toast('error', DENIED);
     if (action.verb === 'page') {
       const page = action.page!;
-      if (detail.state !== 'open' || page >= snapshot.pages!.length) {
+      if (detail.state !== 'open' || !snapshot.pages || page >= snapshot.pages.length) {
         return toast('error', '详情已关闭或页码无效，请从原卡片重新打开。');
       }
       if (detail.page !== page) {
@@ -543,17 +624,37 @@ export class FeishuToolDetails {
       assertSdkSuccess(result);
       detail.state = 'deleted';
       snapshot.openGeneration++;
+      this.releaseThinkingView(snapshot);
       return toast('success', '详情已撤回；平台可能保留撤回提示。');
     } catch {
       const placeholder: FeishuRenderedMessage = {
         ...scopeRoute(scope),
-        feishuHeader: { template: 'blue', title: '工具详情' },
-        feishuElements: [plain('详情已关闭；可从原工具卡片重新打开。')],
+        feishuHeader: {
+          template: 'blue',
+          title: snapshot.kind === 'thinking' ? '思考详情' : '工具详情',
+        },
+        feishuElements: [
+          plain(snapshot.kind === 'thinking'
+            ? '思考详情已关闭；可从原卡片重新打开最新全文。'
+            : '详情已关闭；可从原工具卡片重新打开。'),
+        ],
       };
       await editFeishuMessage(safeClient, detail.messageId, placeholder, this.classifyError);
       detail.state = 'placeholder';
+      this.releaseThinkingView(snapshot);
     }
     return toast('success', '详情未能撤回，已更新为关闭占位；可从原卡片重新打开。');
+  }
+
+  private releaseThinkingView(snapshot: Snapshot): void {
+    if (snapshot.kind !== 'thinking' || snapshot.frozenText === undefined) return;
+    const bytes = Buffer.byteLength(snapshot.frozenText, 'utf8') + snapshot.pages!.length * 16;
+    snapshot.frozenText = undefined;
+    snapshot.pages = undefined;
+    snapshot.pageBudget = undefined;
+    snapshot.bytes -= bytes;
+    // dispose may have cleared the store while a close SDK request was in flight.
+    if (this.snapshots.get(snapshot.id) === snapshot) this.retainedBytes -= bytes;
   }
 
   private card(
@@ -564,17 +665,21 @@ export class FeishuToolDetails {
     content?: string,
   ): FeishuRenderedMessage {
     const bounds = snapshot.pages?.[page];
-    const body = content ?? (bounds ? snapshot.text.slice(bounds[0], bounds[1]) : '');
+    const text = snapshot.frozenText ?? snapshot.text;
+    const body = content ?? (bounds ? text.slice(bounds[0], bounds[1]) : '');
     return {
       ...scopeRoute(scope),
       deliveryId: `${snapshot.id}:open:${snapshot.openGeneration}`,
       feishuHeader: {
         template: snapshot.outcome === 'failed' ? 'red' : 'blue',
-        title: '工具编辑详情 · 快照',
+        title: snapshot.kind === 'thinking' ? '思考详情 · 打开时快照' : '工具编辑详情 · 快照',
       },
       // plain_text is intentional: arbitrary source code/fences/HTML/Markdown remain literal.
       feishuElements: [
-        plain(`第 ${page + 1} / ${total} 页 · 只展示当前页 · 内容按原样文本显示`),
+        plain(`第 ${page + 1} / ${total} 页 · 只展示当前页 · ` +
+          (snapshot.kind === 'thinking'
+            ? '打开时冻结；关闭后重开查看最新全文'
+            : '内容按原样文本显示')),
         plain(body),
       ],
       feishuButtons: [
@@ -593,6 +698,7 @@ export class FeishuToolDetails {
     snapshot: Snapshot,
     scope: Scope,
     budget?: FeishuCardBudget,
+    text = snapshot.frozenText ?? snapshot.text,
   ): ReadonlyArray<readonly [number, number]> | undefined {
     const pages: Array<readonly [number, number]> = [];
     let start = 0;
@@ -608,7 +714,7 @@ export class FeishuToolDetails {
     if (budget && !fitsFeishuCard(serializedCard(sample), budget)) return undefined;
     if (available < 32) return undefined;
     // Outer API content is a JSON string containing card JSON. Count its double escaping.
-    for (const point of snapshot.text) {
+    for (const point of text) {
       const cost = Buffer.byteLength(JSON.stringify(JSON.stringify(point)), 'utf8') - 6;
       if (end > start && size + cost > available) {
         pages.push(Object.freeze([start, end] as const));
@@ -627,7 +733,7 @@ export class FeishuToolDetails {
         scope,
         index,
         pages.length,
-        snapshot.text.slice(from, to),
+        text.slice(from, to),
       );
       if (
         serializedBudget(message) > limit ||
