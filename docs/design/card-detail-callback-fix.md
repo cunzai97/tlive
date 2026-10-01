@@ -5,7 +5,9 @@
 - 基线：`5f7a449`，原块式展示试用版。
 - 修复分支：`fix/card-detail-callback-scope`。
 - 隔离工作区：`/home/pan/work/tlive-card-detail-fix`。
-- 本文件记录本地修复验证；尚未将修复切到运行进程，不覆盖正在运行的试用版 dist，不修改 systemd 或默认 CLI 链接。
+- 已获用户授权，仅重启桥接并独立运行修复版；客户端未重启。未覆盖之前试用版 dist，不修改 systemd 或默认 CLI 链接。
+- 实际桥接 PID：`823702`；就绪时间：`2026-10-01T01:16:39.916Z`。飞书长连接和 local 客户端重新注册均已验证；客户端 PID 仍为 `793041`。
+- 真实客户端按钮验收仍待用户发新任务；重启前快照已清空。运行切换记录位于 `~/.tlive/runtime/card-detail-fix-trial.json`。
 
 ## 协议缺陷与复现
 
