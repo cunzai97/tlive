@@ -129,7 +129,7 @@ export class ProgressContentBuilder {
             ? 'completed'
             : input.errorMessage
               ? 'failed'
-              : input.totalTools === 0 && !input.responseText && input.todoItems.length === 0
+              : input.totalTools === 0 && !input.responseText && !input.thinkingText && input.todoItems.length === 0
                 ? 'starting'
                 : 'executing',
       turnId: input.turnId,
@@ -208,7 +208,12 @@ export class ProgressContentBuilder {
     }
 
     if (input.totalTools === 0 && !input.responseText && input.todoItems.length === 0) {
-      return '⏳ Starting...';
+      // Thinking is already a live model response, not an empty startup state.
+      // Keep a non-empty render signal so the very first delta is flushed, and
+      // make later deltas observable even before any answer or tool arrives.
+      return input.thinkingText.trim()
+        ? this.applyPlatformLimit(redactSensitiveContent(input.thinkingText), input.platformLimit)
+        : '⏳ Starting...';
     }
 
     const lines: string[] = [];

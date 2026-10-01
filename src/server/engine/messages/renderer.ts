@@ -469,7 +469,7 @@ export class MessageRenderer {
             ? 'completed'
             : this.errorMessage
               ? 'failed'
-              : this.totalTools === 0 && !this.responseText && this.todoItems.length === 0
+              : this.totalTools === 0 && !this.responseText && !this.thinkingText && this.todoItems.length === 0
                 ? 'starting'
                 : 'executing',
       turnId: this.turnId,

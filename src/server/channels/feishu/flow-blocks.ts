@@ -196,7 +196,11 @@ export function collectFlowItems(
   // Legacy/no-text payloads still display their answer. Timeline text is authoritative and
   // must not be replayed via renderedText (which includes all preceding model narration).
   const body = progressBodyWithoutMetadata(data);
-  if (!items.some((item) => item.kind === 'text') && body) {
+  // An active timeline is authoritative, even before it has model answer text.
+  // Progress placeholders/summaries must not become a synthetic text event that
+  // makes the current thinking block appear completed and collapses it.
+  const allowBodyFallback = !data.timeline?.length || isFlowTerminal(data);
+  if (allowBodyFallback && !items.some((item) => item.kind === 'text') && body) {
     items.push({
       id: 'fallback-body',
       kind: 'text',

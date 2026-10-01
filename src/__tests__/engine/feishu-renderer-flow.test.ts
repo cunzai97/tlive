@@ -46,6 +46,23 @@ describe('renderer lossless block flow', () => {
     return states[states.length - 1];
   }
 
+  it('flushes the first thinking delta immediately as executing progress before any answer or tool', async () => {
+    const { renderer, states, flush } = create({
+      adaptiveFlush: { baseMs: 250, minMs: 250, maxMs: 1200 },
+    });
+    renderer.onThinkingDelta('我先分析');
+    await advance(0);
+    expect(flush).toHaveBeenCalledTimes(1);
+    expect(states[0]).toMatchObject({ phase: 'executing', thinkingText: '我先分析', responseText: '', totalTools: 0 });
+    expect(states[0].renderedText).toContain('我先分析');
+    expect(states[0].renderedText).not.toContain('Starting');
+    renderer.onThinkingDelta('，还在思考');
+    await advance(250);
+    expect(last(states)).toMatchObject({ phase: 'executing', thinkingText: '我先分析，还在思考', responseText: '', totalTools: 0 });
+    expect(flush.mock.calls.at(-1)?.[1]).toBe(true);
+    expect(states[0].thinkingText).toBe('我先分析');
+  });
+
   it('keeps stable turn/block IDs and merges full consecutive deltas in original order', async () => {
     const { renderer, states } = create();
     const thought = 'thinking '.repeat(400);

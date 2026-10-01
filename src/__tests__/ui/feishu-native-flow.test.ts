@@ -168,6 +168,48 @@ describe('native flow on the real Feishu presentation/sender path', () => {
     assertEntityBudgets();
   });
 
+  it.each([false, true])('shows an expanded first thought before any answer, tool or completion (startup card=%s)', async (startupCard) => {
+    const factory = new QueryPresentationFactory({ defaultWorkdir: '/tmp' });
+    const typing = { stop: vi.fn() };
+    const turn = factory.createTurn({ adapter, msg: {
+      channelType: 'feishu', chatId: 'chat', threadId: 'thread', userId: 'owner', text: '测试',
+      messageId: 'request', replyInThread: true, replyTargetMessageId: 'request',
+    }, binding: {}, sessionKey: 'session', reactions: { permission: 'Pin', processing: 'Typing', stalled: 'OneSecond' },
+      typing, onMessageId() {} });
+    try {
+      if (startupCard) {
+        turn.renderer.onSessionInfo({ tools: [] });
+        await vi.advanceTimersByTimeAsync(1000);
+      }
+      turn.renderer.onThinkingDelta('我先分析');
+      await vi.advanceTimersByTimeAsync(startupCard ? 500 : 120);
+      expect(sdk.imReply).toHaveBeenCalledTimes(1);
+      expect(typing.stop).toHaveBeenCalledTimes(1);
+      const firstMessage = [...messages.keys()][0];
+      const firstCard = remoteMessage(firstMessage);
+      const panel = nodes(firstCard).find((node) => node.tag === 'collapsible_panel')!;
+      expect(panel.expanded).toBe(true);
+      expect(panel.header.title.content).toContain('进行中');
+      expect(nodes(panel).find((node) => node.tag === 'markdown')!.content).toBe('我先分析');
+      expect(firstCard.config.streaming_mode).toBe(true);
+      expect(JSON.stringify(firstCard)).not.toContain('Starting');
+      const firstElement = sdk.text.mock.calls.find(([request]) => request.data.content === '我先分析')![0].path;
+      turn.renderer.onThinkingDelta('，还在继续思考');
+      await vi.advanceTimersByTimeAsync(500);
+      expect(sdk.text.mock.calls.some(([request]) => request.path.card_id === firstElement.card_id &&
+        request.path.element_id === firstElement.element_id && request.data.content === '我先分析，还在继续思考')).toBe(true);
+      expect(nodes(remoteMessage(firstMessage)).find((node) => node.tag === 'collapsible_panel')!.expanded).toBe(true);
+      expect(sdk.cardCreate).toHaveBeenCalledTimes(1);
+      expect(sdk.imPatch).not.toHaveBeenCalled();
+      turn.renderer.onTextDelta('思考结束，开始回答');
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(nodes(remoteMessage(firstMessage)).find((node) => node.tag === 'collapsible_panel')!.expanded).toBe(false);
+      await settle(turn.renderer.onComplete());
+      expect(remoteMessage(firstMessage).config.streaming_mode).toBe(false);
+      assertEntityBudgets();
+    } finally { turn.renderer.dispose(); }
+  });
+
   it('streams actual query deltas before completion and retains scoped detail callbacks', async () => {
     const factory = new QueryPresentationFactory({ defaultWorkdir: '/tmp' });
     const turn = factory.createTurn({ adapter, msg: {

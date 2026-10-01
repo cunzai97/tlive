@@ -80,6 +80,18 @@ function displayCall(overrides: Partial<ToolDisplayCall> = {}): ToolDisplayCall 
 }
 
 describe('flow blocks: semantic grouping and token accounting', () => {
+  it.each(['starting', 'executing'] as const)('keeps a thinking-only %s snapshot running without treating progress text as an answer', (phase) => {
+    const data = progress({ phase, thinkingText: '正在分析', renderedText: '⏳ Starting...',
+      timeline: [{ kind: 'thinking', blockId: 'first-thought', text: '正在分析' }] });
+    expect(collectFlowItems(data)).toEqual([
+      expect.objectContaining({ kind: 'thinking', status: 'running', text: '正在分析' }),
+    ]);
+    const panel = elements(data).find((element) => element.tag === 'collapsible_panel')!;
+    expect(panel.expanded).toBe(true);
+    expect(panel.elements?.[0].content).toBe('正在分析');
+    expect(JSON.stringify(elements(data))).not.toContain('Starting');
+  });
+
   it('defaults to block mode and a 50-token estimated fallback gap', () => {
     expect(DEFAULT_FLOW_BLOCK_OPTIONS).toMatchObject({
       mode: 'blocks', groupGapTokens: 50, fallbackTokenCounter: 'estimatedTokenCount',
