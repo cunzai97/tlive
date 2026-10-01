@@ -94,7 +94,7 @@ describe('FeishuToolDetails snapshot and scoped SDK integration', () => {
     expect(responseType(await details.handle(inbound(`flow_detail:open:${id}`), mock.client, false))).toBe('error');
     for (const mismatch of [
       { userId: 'other' }, { chatId: 'other' }, { threadId: 'other' },
-      { threadId: undefined }, { messageId: 'root' }, { messageId: 'unrelated' },
+      { messageId: 'root' }, { messageId: 'unrelated' },
     ]) expect(responseType(await open(details, id, mock.client, mismatch))).toBe('error');
     expect(responseType(await details.handle(inbound('flow_detail:open:predictable-path'), mock.client, true))).toBe('error');
     expect(await details.handle(inbound('ordinary:callback'), mock.client, true)).toBeUndefined();
@@ -131,6 +131,59 @@ describe('FeishuToolDetails snapshot and scoped SDK integration', () => {
       action: { value: { action: `flow_detail:open:${id}` } },
     }).message!;
     expect(responseType(await details.handle(callback, mock.client, true))).toBe('success');
+  });
+
+  it('opens, pages and closes a topic snapshot with the official callback context lacking thread_id', async () => {
+    const details = store({ pageBytes: 3000 });
+    const mock = sdk();
+    const id = details.register('chat', entry({ inputData: { path: '/x', content: 'x'.repeat(6000) } }))!;
+    bind(details, id);
+    const officialCallback = (verb: string, messageId: string) => feishuCardActionToInbound({
+      operator: { user_id: 'owner', open_id: 'ou-owner' },
+      context: { open_chat_id: 'chat', open_message_id: messageId },
+      action: { value: { action: `flow_detail:${verb}:${id}` } },
+    }).message!;
+    const callback = officialCallback('open', 'source');
+    expect(callback.threadId).toBeUndefined();
+    expect(responseType(await details.handle(callback, mock.client, true))).toBe('success');
+    expect(mock.reply).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      path: { message_id: 'root' }, data: expect.objectContaining({ reply_in_thread: true }),
+    }));
+    const nextPage = officialCallback('page', 'detail-1');
+    nextPage.callbackData = `flow_detail:page:${id}:1`;
+    expect(responseType(await details.handle(nextPage, mock.client, true))).toBe('success');
+    expect(mock.patch).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      path: { message_id: 'detail-1' },
+    }));
+    expect(responseType(await details.handle(officialCallback('close', 'detail-1'), mock.client, true))).toBe('success');
+    expect(mock.del).toHaveBeenCalledExactlyOnceWith({ path: { message_id: 'detail-1' } });
+    expect(mock.create).not.toHaveBeenCalled();
+  });
+
+  it('still requires the exact owner/chat/source or detail message when callback thread_id is absent', async () => {
+    const details = store(); const mock = sdk(); const id = details.register('chat', entry())!;
+    bind(details, id);
+    for (const mismatch of [
+      { userId: 'other' }, { chatId: 'other' }, { messageId: 'root' },
+      { messageId: 'unrelated' }, { messageId: '' },
+    ]) {
+      expect(responseType(await open(details, id, mock.client, { threadId: undefined, ...mismatch }))).toBe('error');
+    }
+    expect(responseType(await details.handle(inbound(`flow_detail:open:${id}`, { threadId: undefined }), mock.client, false))).toBe('error');
+    expect(mock.reply).not.toHaveBeenCalled();
+    expect(responseType(await open(details, id, mock.client))).toBe('success');
+    for (const verb of ['close', `page:${id}:0`]) {
+      const callbackData = verb === 'close' ? `flow_detail:close:${id}` : `flow_detail:${verb}`;
+      for (const mismatch of [
+        { userId: 'other', messageId: 'detail-1' }, { chatId: 'other', messageId: 'detail-1' },
+        { messageId: 'source' }, { messageId: 'unrelated' }, { messageId: '' },
+        { threadId: 'other', messageId: 'detail-1' },
+      ]) {
+        expect(responseType(await details.handle(inbound(callbackData, { threadId: undefined, ...mismatch }), mock.client, true))).toBe('error');
+      }
+    }
+    expect(mock.del).not.toHaveBeenCalled();
+    expect(mock.patch).not.toHaveBeenCalled();
   });
 
   it.each([

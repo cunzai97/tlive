@@ -135,6 +135,40 @@ describe('Feishu block-flow integration at the mocked SDK boundary', () => {
     expect(cards.size).toBe(1);
   });
 
+  it('uses bound message routing for official topic callbacks that omit thread_id, including after edits', async () => {
+    const message = adapter.format({ type: 'progress', chatId: 'chat', data: progress([
+      { kind: 'tool', toolId: 'official-edit', toolName: 'write', status: 'completed', toolResult: 'ok',
+        inputData: { path: 'topic.ts', content: '原始片段'.repeat(1500) } },
+    ]) });
+    const routed = { ...message, flowDetailUserId: 'owner', threadId: 'thread', replyInThread: true,
+      replyToMessageId: 'request', deliveryId: 'official-turn' };
+    const { messageId } = await adapter.send(routed);
+    await adapter.editMessage('chat', messageId, routed);
+    const open = actions(message).find((action) => action.startsWith('flow_detail:open:'))!;
+    const officialTrigger = (action: string, id: string, user = 'owner', chat = 'chat') => sdk.handlers.get('card.action.trigger')!({
+      operator: { user_id: user, open_id: `open-${user}` },
+      action: { tag: 'button', value: { action } },
+      context: { open_chat_id: chat, open_message_id: id },
+    });
+    const before = cards.size;
+    for (const args of [[open, messageId, 'other'], [open, messageId, 'owner', 'wrong'], [open, 'wrong']]) {
+      expect(await officialTrigger(...args as Parameters<typeof officialTrigger>)).toMatchObject({ toast: { type: 'error' } });
+    }
+    expect(cards.size).toBe(before);
+    expect(await officialTrigger(open, messageId)).toMatchObject({ toast: { type: 'success' } });
+    expect(cards.size).toBe(before + 1);
+    expect(sdk.reply.mock.calls.at(-1)![0]).toMatchObject({
+      path: { message_id: 'request' }, data: { reply_in_thread: true },
+    });
+    const detailId = `card-${next}`;
+    const nextPage = actions(JSON.parse(cards.get(detailId)!)).find((action) => action.startsWith('flow_detail:page:'))!;
+    expect(await officialTrigger(nextPage, detailId)).toMatchObject({ toast: { type: 'success' } });
+    const close = actions(JSON.parse(cards.get(detailId)!)).find((action) => action.startsWith('flow_detail:close:'))!;
+    expect(await officialTrigger(close, detailId)).toMatchObject({ toast: { type: 'success' } });
+    expect(cards.has(detailId)).toBe(false);
+    expect(await adapter.consumeOne()).toBeNull();
+  });
+
   it('honors configured exploration mapping without retaining successful output in the card', async () => {
     const message = adapter.format({ type: 'progress', chatId: 'chat', data: progress([
       { kind: 'tool', toolId: 'read', toolName: 'lookup', toolInput: 'query', status: 'completed', toolResult: 'SUCCESS_OUTPUT_NOT_SENT' },

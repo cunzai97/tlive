@@ -454,11 +454,14 @@ export class FeishuToolDetails {
       !snapshot.pages ||
       message.channelType !== 'feishu' ||
       message.chatId !== scope.chatId ||
-      message.threadId !== scope.threadId ||
+      (message.threadId !== undefined && message.threadId !== scope.threadId) ||
       message.userId !== scope.ownerUserId ||
       !message.messageId
     )
       return false;
+    // card.action.trigger documents chat/message IDs, but not thread_id. The exact
+    // server-bound source/detail message anchors its topic when that field is absent.
+    // An explicitly conflicting topic is still rejected above; never route from callback data.
     if (action.verb === 'open') return snapshot.sources.has(message.messageId);
     return message.messageId === snapshot.detail?.messageId;
   }
