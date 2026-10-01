@@ -64,6 +64,7 @@ jobs:
             package.json
             package-lock.json
             dist/
+            integrations/pi-subagent/
             scripts/cli.js
             scripts/postinstall.js
             scripts/preuninstall.js
