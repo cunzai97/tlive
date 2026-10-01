@@ -34,4 +34,11 @@ Coverage includes tail bounds, Unicode/whitespace, aggregate multi-block budget,
 
 ## Rollout and rollback
 
-Not deployed yet. Keep the running standalone 400ms bridge and original client unchanged until user confirms switching. Rollback worktree: `/home/pan/work/tlive-card-snapshot-400ms`; no default CLI or systemd unit modification.
+User selected **现在切换新版试用**. Deployed as a standalone bridge; only the verified old bridge received SIGTERM, no worker stop/restart command was invoked.
+
+- Running code: `e5c4b32`; new bridge PID `1020934`, original client PID `793041` preserved; old bridge PID `981267` exited normally.
+- Fresh readyAt: `2026-10-01T04:26:59.761Z`. Read back PID, cwd, command, flags, websocket readiness and fresh original local-client registration.
+- Runtime: native=false, block flow, 400ms target. Bridge has no active proxy; client environment and exact process identity unchanged.
+- SHA-256 of running `dist/main.mjs`: `f8a927649c00b8954c5b705b13dde4586903ea0cff42f98d7df330f06fdaf52d`.
+- Systemd unit files, default CLI and old rollback dist verified unchanged. Rollback worktree: `/home/pan/work/tlive-card-snapshot-400ms`, commit `70eaab9`.
+- Record: `/home/pan/.tlive/runtime/card-thinking-tail-trial.json`. Old detail-memory snapshots were cleared by bridge restart; new phone acceptance must use a new turn. Actual phone layout/interaction remains pending user trial; performance debugging stays deferred.
