@@ -117,6 +117,15 @@ export class SubagentFlowPresenter {
     this.schedule(child);
   }
 
+  /** Drain only this call's already-consumed states, without closing other child streams. */
+  async flushTool(parentToolUseId: string): Promise<void> {
+    const children = [...this.children.values()].filter(child => child.snapshot.parentToolUseId === parentToolUseId);
+    for (const child of children) this.schedule(child);
+    await Promise.all(children.map(child => this.waitForIdle(child)));
+    const errors = children.filter(child => child.error !== undefined).map(child => child.error);
+    if (errors.length) throw new AggregateError(errors, 'Subagent progress delivery failed');
+  }
+
   /**
    * Seal all streams and await final deliveries, including bounded network retries.
    * Like the parent renderer, unfinished work is Stopped/Interrupted, never success.

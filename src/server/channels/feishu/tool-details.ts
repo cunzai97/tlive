@@ -69,6 +69,8 @@ interface Snapshot {
   readonly kind: 'tool' | 'thinking';
   /** Immutable for tools; only the latest redacted full source for thinking. */
   text: string;
+  /** Trusted diff ranges in the redacted source; never inferred from source labels. */
+  readonly diffRanges?: ReadonlyArray<readonly [number, number]>;
   /** Held separately until a confirmed close, including send retries. */
   frozenText?: string;
   readonly outcome: Outcome;
@@ -149,11 +151,21 @@ function stringField(data: Record<string, unknown>, names: string[]): string | u
 function signedLines(text: string, prefix: '-' | '+'): string {
   // Empty snippets contain no lines. Preserve blank lines and trailing newlines
   // for non-empty snippets; the sign is display metadata, not file content.
-  return text.length === 0 ? '' : text.split('\n').map(line => `${prefix}${line}`).join('\n');
+  return text.length === 0
+    ? ''
+    : text
+        .split('\n')
+        .map((line) => `${prefix}${line}`)
+        .join('\n');
 }
 
-function editSections(input: unknown): string[] {
-  const sections: string[] = [];
+interface DetailPart {
+  text: string;
+  diff?: boolean;
+}
+
+function editSections(input: unknown): DetailPart[][] {
+  const sections: DetailPart[][] = [];
   const visit = (value: unknown, parentPath?: string): void => {
     if (Array.isArray(value)) {
       for (const item of value) visit(item, parentPath);
@@ -166,20 +178,20 @@ function editSections(input: unknown): string[] {
     const newText = stringField(data, ['new_string', 'newText', 'new_text', 'newString']);
     const content = stringField(data, ['content', 'file_content', 'fileContent', 'file content']);
     if (oldText !== undefined || newText !== undefined) {
-      const diff = [
-        oldText === undefined ? '（未提供旧片段）' : signedLines(oldText, '-'),
-        newText === undefined ? '（未提供新片段）' : signedLines(newText, '+'),
-      ].filter(Boolean).join('\n');
-      sections.push(
-        `文件：${path ?? '未提供文件路径'}\n本次改动（替换片段）\n` +
-          '未提供旧文件全文；以下仅为本次替换片段，不是完整文件差异。\n' +
-          (diff || '（替换片段为空）'),
-      );
+      const parts: DetailPart[] = [{ text: `${path ? `文件：${path}\n` : ''}替换片段：\n` }];
+      for (const [snippet, sign] of [[oldText, '-'], [newText, '+']] as const) {
+        if (snippet === undefined) continue;
+        const text = signedLines(redactSensitiveContent(snippet), sign);
+        if (!text) continue;
+        if (parts.length > 1) parts.push({ text: '\n', diff: true });
+        parts.push({ text, diff: true });
+      }
+      sections.push(parts);
     } else if (content !== undefined) {
-      sections.push(
-        `文件：${path ?? '未提供文件路径'}\n本次新增／写入内容：\n${signedLines(content, '+')}\n` +
-          '这是本次提交的内容；不据此断言文件此前不存在，也不展示完整文件差异。',
-      );
+      sections.push([
+        { text: `${path ? `文件：${path}\n` : ''}写入：\n` },
+        { text: signedLines(redactSensitiveContent(content), '+'), diff: true },
+      ]);
     }
     for (const name of ['edits', 'changes', 'files', 'replacements']) {
       if (Array.isArray(data[name])) visit(data[name], path);
@@ -328,18 +340,33 @@ export class FeishuToolDetails {
       if (sections.length === 0) return undefined;
       const labels: Record<Outcome, string> = {
         success: '工具执行成功 · 本次改动',
-        failed: '工具执行失败 · 拟改动内容（不代表改动成功）',
-        interrupted: '工具执行中断 · 拟改动内容（不代表改动完成）',
-        returned: '工具结果已返回 · 执行状态未提供（不据此断言成功）',
+        failed: '工具执行失败 · 拟改动内容',
+        interrupted: '工具执行中断 · 拟改动内容',
+        returned: '工具结果已返回',
       };
       const resultText =
         typeof cloned.result === 'string' ? cloned.result : JSON.stringify(cloned.result, null, 2);
-      const text = redactSensitiveContent(
-        `${labels[state]}\n工具：${cloned.toolName}\n\n${sections.join('\n\n')}\n\n` +
-          `工具结果快照：\n${resultText}`,
-      );
+      let text = '';
+      const diffRanges: Array<readonly [number, number]> = [];
+      const append = (part: DetailPart): void => {
+        const value = redactSensitiveContent(part.text);
+        const start = text.length;
+        text += value;
+        if (!part.diff || !value) return;
+        const previous = diffRanges.at(-1);
+        if (previous?.[1] === start)
+          diffRanges[diffRanges.length - 1] = Object.freeze([previous[0], text.length]);
+        else diffRanges.push(Object.freeze([start, text.length]));
+      };
+      append({ text: `${labels[state]}\n工具：${cloned.toolName}\n\n` });
+      sections.forEach((section, index) => {
+        if (index) append({ text: '\n\n' });
+        section.forEach(append);
+      });
+      append({ text: `\n\n工具结果快照：\n${resultText}` });
       const id = randomUUID();
-      const bytes = Buffer.byteLength(text + id + key + chatId, 'utf8') + 640;
+      const bytes =
+        Buffer.byteLength(text + id + key + chatId, 'utf8') + 640 + diffRanges.length * 16;
       if (!this.reserve(bytes, true)) return undefined;
       const snapshot: Snapshot = {
         id,
@@ -347,6 +374,7 @@ export class FeishuToolDetails {
         chatId,
         kind: 'tool',
         text,
+        diffRanges: Object.freeze(diffRanges),
         outcome: state,
         expiresAt: this.now() + this.ttlMs,
         openGeneration: 0,
@@ -634,9 +662,11 @@ export class FeishuToolDetails {
           title: snapshot.kind === 'thinking' ? '思考详情' : '工具详情',
         },
         feishuElements: [
-          plain(snapshot.kind === 'thinking'
-            ? '思考详情已关闭；可从原卡片重新打开最新全文。'
-            : '详情已关闭；可从原工具卡片重新打开。'),
+          plain(
+            snapshot.kind === 'thinking'
+              ? '思考详情已关闭；可从原卡片重新打开最新全文。'
+              : '详情已关闭；可从原工具卡片重新打开。',
+          ),
         ],
       };
       await editFeishuMessage(safeClient, detail.messageId, placeholder, this.classifyError);
@@ -663,6 +693,7 @@ export class FeishuToolDetails {
     page: number,
     total: number,
     content?: string,
+    offset?: number,
   ): FeishuRenderedMessage {
     const bounds = snapshot.pages?.[page];
     const text = snapshot.frozenText ?? snapshot.text;
@@ -674,14 +705,18 @@ export class FeishuToolDetails {
         template: snapshot.outcome === 'failed' ? 'red' : 'blue',
         title: snapshot.kind === 'thinking' ? '思考详情 · 打开时快照' : '工具编辑详情 · 快照',
       },
-      // plain_text is intentional: arbitrary source code/fences/HTML/Markdown remain literal.
-      feishuElements: [
-        plain(`第 ${page + 1} / ${total} 页 · 只展示当前页 · ` +
-          (snapshot.kind === 'thinking'
-            ? '打开时冻结；关闭后重开查看最新全文'
-            : '内容按原样文本显示')),
-        plain(body),
-      ],
+      feishuElements:
+        snapshot.kind === 'thinking'
+          ? [
+              plain(
+                `第 ${page + 1} / ${total} 页 · 只展示当前页 · 打开时冻结；关闭后重开查看最新全文`,
+              ),
+              plain(body),
+            ]
+          : [
+              plain(`${page + 1} / ${total}`),
+              ...editElements(snapshot, body, offset ?? bounds?.[0] ?? 0),
+            ],
       feishuButtons: [
         ...(page > 0
           ? [{ label: '上一页', callbackData: `flow_detail:page:${snapshot.id}:${page - 1}` }]
@@ -725,25 +760,41 @@ export class FeishuToolDetails {
       size += cost;
     }
     pages.push(Object.freeze([start, end] as const));
-    // Verify actual final card and envelope for every page before retaining the page index.
-    for (let index = 0; index < pages.length; index++) {
-      const [from, to] = pages[index];
-      const message = this.card(
-        snapshot,
-        scope,
-        index,
-        pages.length,
-        text.slice(from, to),
+    const fits = (from: number, to: number, index: number, total: number): boolean => {
+      const message = this.card(snapshot, scope, index, total, text.slice(from, to), from);
+      const card = serializedCard(message);
+      return (
+        serializedBudget(message) <= limit &&
+        (!budget ||
+          (fitsFeishuCard(card, budget) && planFeishuCards(JSON.parse(card), budget).length === 1))
       );
-      if (
-        serializedBudget(message) > limit ||
-        (budget &&
-          (!fitsFeishuCard(serializedCard(message), budget) ||
-            planFeishuCards(JSON.parse(serializedCard(message)), budget).length !== 1))
-      )
-        return undefined;
+    };
+    // Synthetic fences and multiple metadata/code components have real costs. Shrink
+    // failing candidates, never silently drop source or let the sender add sibling cards.
+    const checked: Array<readonly [number, number]> = [];
+    for (const [from, to] of pages) {
+      let cursor = from;
+      do {
+        let stop = to;
+        while (!fits(cursor, stop, 999_999_997, 999_999_999)) {
+          let next = cursor + Math.floor((stop - cursor) / 2);
+          if (
+            next > cursor &&
+            /[\uDC00-\uDFFF]/.test(text[next]) &&
+            /[\uD800-\uDBFF]/.test(text[next - 1])
+          )
+            next--;
+          if (next <= cursor) return undefined;
+          stop = next;
+        }
+        checked.push(Object.freeze([cursor, stop] as const));
+        cursor = stop;
+      } while (cursor < to);
     }
-    return Object.freeze(pages);
+    for (let index = 0; index < checked.length; index++) {
+      if (!fits(checked[index][0], checked[index][1], index, checked.length)) return undefined;
+    }
+    return Object.freeze(checked);
   }
 
   private remove(snapshot: Snapshot): void {
@@ -773,6 +824,27 @@ export class FeishuToolDetails {
       (!newEntry || this.snapshots.size < this.maxEntries)
     );
   }
+}
+
+/** Each page closes its own fence; only trusted ranges are Markdown. */
+function editElements(snapshot: Snapshot, text: string, offset: number): FeishuCardElement[] {
+  const elements: FeishuCardElement[] = [];
+  let cursor = offset;
+  const end = offset + text.length;
+  for (const [from, to] of snapshot.diffRanges ?? []) {
+    const start = Math.max(offset, from);
+    const stop = Math.min(end, to);
+    if (stop <= start) continue;
+    if (start > cursor) elements.push(plain(text.slice(cursor - offset, start - offset)));
+    const source = text.slice(start - offset, stop - offset);
+    let length = 3;
+    for (const match of source.matchAll(/`+/g)) length = Math.max(length, match[0].length + 1);
+    const fence = '`'.repeat(length);
+    elements.push({ tag: 'markdown', content: `${fence}diff\n${source}\n${fence}` });
+    cursor = stop;
+  }
+  if (cursor < end || elements.length === 0) elements.push(plain(text.slice(cursor - offset)));
+  return elements;
 }
 
 function plain(content: string): FeishuCardElement {
@@ -810,6 +882,7 @@ function serializedBudget(message: FeishuRenderedMessage): number {
       root_id: message.replyToMessageId,
       reply_in_thread: message.replyInThread,
       msg_type: 'interactive',
+      uuid: '0'.repeat(36),
       content,
     },
   };

@@ -101,7 +101,9 @@ describe('Feishu block-flow integration at the mocked SDK boundary', () => {
     expect(await trigger(open, sourceId)).toMatchObject({ toast: { type: 'success' } });
     expect(cards.size).toBe(before + 1);
     const detailId = `card-${next}`;
-    expect(cards.get(detailId)).toContain('只展示当前页');
+    expect(cards.get(detailId)).toMatch(/1 \/ \d+/);
+    expect(cards.get(detailId)).toContain('```diff');
+    expect(cards.get(detailId)).not.toContain('只展示当前页');
     expect(cards.get(detailId)).toContain('example.ts');
     expect(cards.get(detailId)).not.toContain(content);
     const nextPage = actions(JSON.parse(cards.get(detailId)!)).find((action) => action.startsWith('flow_detail:page:'))!;

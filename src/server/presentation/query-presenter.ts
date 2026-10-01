@@ -70,7 +70,7 @@ export class QueryExecutionPresenter {
         content,
       );
 
-      if (state.phase === 'completed' && this.shouldSplitCompletedTrace(state)) {
+      if (state.phase === 'completed' && !state.presentationBoundary && this.shouldSplitCompletedTrace(state)) {
         const traceMsg = this.adapter.format({
           type: 'progress',
           chatId: this.inbound.chatId,
@@ -84,7 +84,7 @@ export class QueryExecutionPresenter {
         const traceOutMsg = {
           ...withInboundReplyContext(traceMsg, this.inbound),
           flowDetailUserId: this.inbound.userId,
-          deliveryId: state.turnId,
+          deliveryId: state.deliveryId ?? state.turnId,
         };
         if (isEdit) {
           await this.editExistingOrSend(traceOutMsg);
@@ -101,7 +101,7 @@ export class QueryExecutionPresenter {
         });
         await this.adapter.send({
           ...withInboundReplyContext(summaryMsg, this.inbound),
-          deliveryId: state.turnId ? `${state.turnId}:answer` : undefined,
+          deliveryId: (state.deliveryId ?? state.turnId) ? `${state.deliveryId ?? state.turnId}:answer` : undefined,
         });
         return;
       }
@@ -117,7 +117,7 @@ export class QueryExecutionPresenter {
     outMsg = {
       ...withInboundReplyContext(outMsg, this.inbound),
       flowDetailUserId: this.inbound.userId,
-      deliveryId: state?.turnId,
+      deliveryId: state?.deliveryId ?? state?.turnId,
     };
 
     if (!isEdit) {

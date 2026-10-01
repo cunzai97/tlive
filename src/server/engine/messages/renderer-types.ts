@@ -47,6 +47,9 @@ export interface CurrentTool {
 /** Renderer state snapshot for progress display */
 export interface MessageRendererState {
   turnId?: string;
+  /** Independent physical segment, while turn/block identity remains stable. */
+  deliveryId?: string;
+  presentationBoundary?: boolean;
   phase: 'starting' | 'executing' | 'waiting_permission' | 'completed' | 'failed';
   renderedText: string;
   responseText: string;

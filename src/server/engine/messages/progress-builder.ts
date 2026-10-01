@@ -36,6 +36,9 @@ function formatContextUsage(ctx: {
 /** Input state for rendering */
 export interface RenderInput {
   turnId?: string;
+  /** Independent physical segment, while turn/block identity remains stable. */
+  deliveryId?: string;
+  presentationBoundary?: boolean;
   phase: 'starting' | 'executing' | 'waiting_permission' | 'completed' | 'failed';
   responseText: string;
   thinkingText: string;
@@ -133,6 +136,8 @@ export class ProgressContentBuilder {
                 ? 'starting'
                 : 'executing',
       turnId: input.turnId,
+      deliveryId: input.deliveryId,
+      presentationBoundary: input.presentationBoundary,
       renderedText: content,
       responseText: input.responseText,
       elapsedSeconds: input.elapsedSeconds,
@@ -193,7 +198,7 @@ export class ProgressContentBuilder {
 
   private renderExecuting(input: RenderInput, _locale: Locale = 'zh'): string {
     // After bubble split: show continuation hint
-    if (input.bubbleToolCount === 0 && input.totalTools > 0) {
+    if (input.bubbleToolCount === 0 && input.totalTools > 0 && !input.responseText && !input.thinkingText) {
       const lines: string[] = [];
       lines.push(t('progress.continueExec').replace('{steps}', String(input.totalTools)));
       if (input.todoItems.length > 0) {

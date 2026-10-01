@@ -16,7 +16,7 @@ interface Request {
 }
 interface Card {
   header: { template: string };
-  body: { elements: Array<{ text?: { content: string } }> };
+  body: { elements: Array<{ tag?: string; content?: string; text?: { content: string } }> };
 }
 const instances: FeishuToolDetails[] = [];
 afterEach(() => {
@@ -68,7 +68,17 @@ function page(details: FeishuToolDetails, id: string, n: number, client: Client)
   return details.handle(inbound(`flow_detail:page:${id}:${n}`, { messageId: 'detail-1' }), client, true);
 }
 function card(request: Request): Card { return JSON.parse(request.data.content) as Card; }
-function body(request: Request): string { return card(request).body.elements[1].text!.content; }
+function body(request: Request): string {
+  return card(request).body.elements.slice(1).map(element => {
+    if (element.tag !== 'markdown') return element.text?.content ?? '';
+    const content = element.content!;
+    const opening = /^(`{3,})diff\n/.exec(content)!;
+    const suffix = `\n${opening[1]}`;
+    expect(content.endsWith(suffix)).toBe(true);
+    // Strip only the generated framing, never trim original whitespace/boundaries.
+    return content.slice(opening[0].length, -suffix.length);
+  }).join('');
+}
 function responseType(response: Record<string, unknown> | undefined): string | undefined {
   return (response?.toast as { type?: string } | undefined)?.type;
 }
@@ -76,7 +86,7 @@ async function allPages(details: FeishuToolDetails, id: string, mock: ReturnType
   expect(responseType(await open(details, id, mock.client))).toBe('success');
   const first = mock.reply.mock.calls[0][0];
   const heading = card(first).body.elements[0].text!.content;
-  const total = Number(/第 1 \/ (\d+) 页/.exec(heading)![1]);
+  const total = Number(/^1 \/ (\d+)$/.exec(heading)![1]);
   const requests = [first];
   for (let n = 1; n < total; n++) {
     expect(responseType(await page(details, id, n, mock.client))).toBe('success');
@@ -187,7 +197,7 @@ describe('FeishuToolDetails snapshot and scoped SDK integration', () => {
   });
 
   it.each([
-    ['write', { file_path: '/not/on/disk', content: 'original' }, '本次新增／写入内容'],
+    ['write', { file_path: '/not/on/disk', content: 'original' }, '写入：'],
     ['replace', { path: '/not/on/disk', oldText: 'before', newText: 'after' }, '-before\n+after'],
     ['Edit', { file_path: '/not/on/disk', old_string: 'before', new_string: 'after' }, '-before\n+after'],
     ['MultiEdit', { file_path: '/not/on/disk', edits: [{ old_string: 'one', new_string: 'two' }, { old_string: 'three', new_string: 'four' }] }, '-three\n+four'],
@@ -226,8 +236,8 @@ describe('FeishuToolDetails snapshot and scoped SDK integration', () => {
   it.each([
     [{ oldText: '', newText: '新增' }, '+新增', '-（'],
     [{ oldText: '删除', newText: '' }, '-删除', '+（'],
-    [{ newText: '已知新内容' }, '（未提供旧片段）\n+已知新内容', '-（未提供旧片段）'],
-    [{ oldText: '已知旧内容' }, '-已知旧内容\n（未提供新片段）', '+（未提供新片段）'],
+    [{ newText: '已知新内容' }, '+已知新内容', '未提供旧片段'],
+    [{ oldText: '已知旧内容' }, '-已知旧内容', '未提供新片段'],
   ])('does not invent diff lines for empty or missing snippets %j', async (snippets, expected, absent) => {
     const details = store(); const mock = sdk();
     const id = details.register('chat', entry({ toolName: 'replace', inputData: { path: '/x', ...snippets } }))!;
@@ -256,7 +266,7 @@ describe('FeishuToolDetails snapshot and scoped SDK integration', () => {
     bind(details, id);
     const result = await allPages(details, id, mock);
     expect(result.total).toBeGreaterThan(1);
-    const marker = '未提供旧文件全文；以下仅为本次替换片段，不是完整文件差异。\n';
+    const marker = '替换片段：\n';
     const from = result.text.indexOf(marker) + marker.length;
     const to = result.text.indexOf('\n\n工具结果快照：', from);
     const lines = result.text.slice(from, to).split('\n');
@@ -283,7 +293,7 @@ describe('FeishuToolDetails snapshot and scoped SDK integration', () => {
     bind(details, id); await open(details, id, mock.client);
     const request = mock.reply.mock.calls[0][0];
     expect(card(request).header.template).toBe('red');
-    expect(body(request)).toContain('不代表改动成功');
+    expect(body(request)).toContain('工具执行失败 · 拟改动内容');
     expect(request.data.content).not.toContain('工具执行成功');
     expect(request.data.content).not.toContain('primary_filled');
     expect(request.data.content).not.toContain('查看改动');
@@ -328,8 +338,7 @@ describe('FeishuToolDetails snapshot and scoped SDK integration', () => {
     expect(result.total).toBeGreaterThan(2);
     const added = content.split('\n').map(line => `+${line}`).join('\n');
     const expected = '工具执行成功 · 本次改动\n工具：write\n\n' +
-      `文件：/nonexistent/snapshot.txt\n本次新增／写入内容：\n${added}\n` +
-      '这是本次提交的内容；不据此断言文件此前不存在，也不展示完整文件差异。\n\n' +
+      `文件：/nonexistent/snapshot.txt\n写入：\n${added}\n\n` +
       '工具结果快照：\nwritten';
     expect(result.text).toBe(expected);
     expect(mock.reply).toHaveBeenCalledTimes(1);
@@ -369,7 +378,7 @@ describe('FeishuToolDetails snapshot and scoped SDK integration', () => {
     release();
     expect((await Promise.all([first, second])).map(responseType)).toEqual(['success', 'success']);
     expect(mock.patch).toHaveBeenCalledTimes(2);
-    expect(card(mock.patch.mock.calls[1][0]).body.elements[0].text!.content).toContain('第 3 /');
+    expect(card(mock.patch.mock.calls[1][0]).body.elements[0].text!.content).toMatch(/^3 \/ \d+$/);
   });
 
   it('withdraws the exact detail and makes reopen a single fresh detail', async () => {

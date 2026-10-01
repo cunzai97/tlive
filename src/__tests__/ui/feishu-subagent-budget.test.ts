@@ -118,7 +118,7 @@ describe('single-card subagent display budget', () => {
     expect(serialized).not.toContain('STDOUT_old');
     expect(serialized).not.toContain('private-payload');
     expect(visible(output)).toContain('bash');
-    expect(visible(output)).toContain(status);
+    expect(visible(output)).toContain(status === 'failed' ? '❌失败1' : '⏹中断1');
     expect(visible(output)).toContain('PROVIDER_FINAL_ERROR');
     expect(nodes(output).find((node) => node.element_id === 'outer')?.expanded).toBe(true);
     expect(nodes(output).find((node) => node.element_id === 'latest')).toEqual(md('KEEP_LATEST', 'latest'));
@@ -178,7 +178,9 @@ describe('single-card subagent display budget', () => {
     expect(nodes(output).filter((node) => node.tag === 'collapsible_panel')).toHaveLength(0);
     expect(nodes(output).filter((node) => node.tag === 'button')).toHaveLength(0);
     expect(output.body.elements).toHaveLength(2);
-    expect(output.body.elements[0].content.split('\n')).toEqual(tools.map((entry) => entry.chunk.toolName));
+    const counts = new Map<string, number>();
+    for (const entry of tools) counts.set(entry.chunk.toolName!, (counts.get(entry.chunk.toolName!) ?? 0) + 1);
+    expect(output.body.elements[0].content.split('\n')).toEqual([...counts].map(([name, count]) => `${name}x${count}`));
     expect(output.body.elements[1]).toEqual(md('LATEST', 'latest'));
   });
 

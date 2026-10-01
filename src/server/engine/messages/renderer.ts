@@ -95,6 +95,11 @@ export class MessageRenderer {
   private pendingToolResults = new Map<string, { content: string; isError: boolean }>();
   private readonly turnId = randomUUID();
   private nextBlockIndex = 0;
+  private segmentIndex = 0;
+  private readonly sealedToolIds = new Set<string>();
+  private awaitingContinuation = false;
+  private flushJobs = new Set<Promise<void>>();
+  private lastFlushError?: Error;
   private readonly channelOwnsPagination: boolean;
   private lastTimelineIsText = false;
   private splitPending = false;
@@ -184,7 +189,8 @@ export class MessageRenderer {
   }
 
   onThinkingDelta(text: string): void {
-    if (this.completed || this.errorMessage) return;
+    if (!text || this.completed || this.errorMessage) return;
+    this.awaitingContinuation = false;
     this.thinkingText += text;
     const last = this.timeline[this.timeline.length - 1];
     if (last?.kind === 'thinking') {
@@ -201,7 +207,8 @@ export class MessageRenderer {
 
   onToolStart(name: string, input?: Record<string, unknown>, toolUseId?: string): void {
     if (HIDDEN_TOOLS.has(name) || this.completed || this.errorMessage) return;
-    if (toolUseId && this.toolIdToTimelineIndex.has(toolUseId)) return;
+    if (toolUseId && (this.toolIdToTimelineIndex.has(toolUseId) || this.sealedToolIds.has(toolUseId))) return;
+    this.awaitingContinuation = false;
     this.onApiRetryCleared();
     const current = this.toolCounts.get(name) ?? 0;
     this.toolCounts.set(name, current + 1);
@@ -309,6 +316,7 @@ export class MessageRenderer {
   }
 
   onToolComplete(toolUseId: string): void {
+    if (this.sealedToolIds.has(toolUseId)) return;
     const tlIdx = this.toolIdToTimelineIndex.get(toolUseId);
     const logIdx = this.toolIdToLogIndex.get(toolUseId);
     const entry = tlIdx === undefined ? undefined : this.timeline[tlIdx];
@@ -323,6 +331,7 @@ export class MessageRenderer {
   }
 
   onToolResult(toolUseId: string, content: string, isError: boolean): void {
+    if (this.sealedToolIds.has(toolUseId)) return;
     const tlIdx = this.toolIdToTimelineIndex.get(toolUseId);
     if (tlIdx === undefined) {
       if (this.completed || this.errorMessage) return;
@@ -372,7 +381,8 @@ export class MessageRenderer {
   }
 
   onTextDelta(text: string): void {
-    if (this.completed || this.errorMessage) return;
+    if (!text || this.completed || this.errorMessage) return;
+    this.awaitingContinuation = false;
     this.responseText += text;
     // Any streamed content means the retry landed, so drop the indicator.
     this.onApiRetryCleared();
@@ -415,6 +425,9 @@ export class MessageRenderer {
   }
 
   onComplete(): Promise<void> {
+    if (this.awaitingContinuation && !this.errorMessage) {
+      this.completed = true; this.stopTimers(); return Promise.resolve();
+    }
     if (!this.errorMessage) this.completed = true;
     this.settlePendingTools(this.errorMessage === 'Interrupted' ? 'interrupted' : 'failed');
     this.forceFlush = true;
@@ -476,6 +489,7 @@ export class MessageRenderer {
                 ? 'starting'
                 : 'executing',
       turnId: this.turnId,
+      deliveryId: this.segmentIndex ? `${this.turnId}:segment:${this.segmentIndex}` : this.turnId,
       responseText: this.responseText,
       thinkingText: this.thinkingText,
       elapsedSeconds: this.elapsedSeconds,
@@ -507,7 +521,7 @@ export class MessageRenderer {
   }
 
   private scheduleFlush(): void {
-    if (this.timer) return;
+    if (this.timer || this.awaitingContinuation) return;
     const renderInput = this.getRenderInput();
     const content = this.contentBuilder.render(renderInput);
     const delay = this.adaptiveFlush
@@ -546,9 +560,57 @@ export class MessageRenderer {
     return state.phase === 'starting' || state.phase === 'executing';
   }
 
-  private async doFlush(content: string): Promise<void> {
+  private doFlush(content: string, frozen?: MessageRendererState): Promise<void> {
+    const job = this.performFlush(content, frozen);
+    this.flushJobs.add(job);
+    void job.finally(() => this.flushJobs.delete(job)).catch(() => {});
+    return job;
+  }
+
+  /** Drain old sends before changing the physical segment/message identity. */
+  async flushProgress(): Promise<void> {
+    if (this.awaitingContinuation) return;
+    if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+    while (this.flushJobs.size) await Promise.all([...this.flushJobs]);
+    if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+    this.forceFlush = true;
+    await this.doFlush(this.contentBuilder.render(this.getRenderInput()));
+    while (this.flushJobs.size) await Promise.all([...this.flushJobs]);
+    if (this.lastFlushError) throw this.lastFlushError;
+  }
+
+  /** Explicit Feishu delegation boundary, not a whole-turn completion. */
+  async sealForContinuation(): Promise<void> {
+    if (this.awaitingContinuation || this.completed || this.errorMessage) return;
+    if (!this.timeline.length && !this.responseText && !this.thinkingText) return;
+    if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+    while (this.flushJobs.size) await Promise.all([...this.flushJobs]);
+    if (!this._messageId) await this.flushProgress();
+    if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+    const input = { ...this.getRenderInput(), completed: true, phase: 'completed' as const,
+      presentationBoundary: true, footerLine: undefined };
+    const content = this.contentBuilder.render(input);
+    const state = this.contentBuilder.getStateSnapshot(input, content);
+    this.forceFlush = true;
+    await this.doFlush(content, state);
+    while (this.flushJobs.size) await Promise.all([...this.flushJobs]);
+    if (this.lastFlushError) throw this.lastFlushError;
+    if (!this._messageId) throw new Error('Main card boundary has no confirmed message ID');
+    if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+    for (const id of this.toolIdToTimelineIndex.keys()) this.sealedToolIds.add(id);
+    this.resetBubbleState();
+    this.segmentIndex++;
+    this.awaitingContinuation = true;
+    this.currentTool = null;
+    this.taskSummary = '';
+    this.toolUseSummaryText = undefined;
+    this.splitPending = false;
+    this.pendingFlush = false;
+  }
+
+  private async performFlush(content: string, frozen?: MessageRendererState): Promise<void> {
     if (!content) return;
-    const state = this.contentBuilder.getStateSnapshot(this.getRenderInput(), content);
+    const state = frozen ?? this.contentBuilder.getStateSnapshot(this.getRenderInput(), content);
     if (this.shouldSkipFlush(state)) return;
 
     const now = Date.now();
@@ -572,6 +634,7 @@ export class MessageRenderer {
     this.forceFlush = false;
 
     this.flushing = true;
+    this.lastFlushError = undefined;
     try {
       const isEdit = !!this._messageId;
       const flushButtons = this.permissionTracker?.getHead()?.buttons;
@@ -602,10 +665,12 @@ export class MessageRenderer {
             result = await this.flushCallback(content, isEdit, flushButtons, state);
             this.adaptiveFlush?.recordFlushLatency(Date.now() - retryStartedAt);
           } catch (_retryErr) {
+            this.lastFlushError = _retryErr instanceof Error ? _retryErr : new Error('Progress update failed after retry');
             console.error('[renderer] Failed after retry:', err);
             this.onFlushError?.(err, { phase, contentPreview });
           }
         } else {
+          this.lastFlushError = err instanceof Error ? err : new Error('Progress update failed');
           console.error('[renderer] Failed:', err);
           this.onFlushError?.(err, { phase, contentPreview });
         }

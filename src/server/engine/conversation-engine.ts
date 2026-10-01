@@ -160,13 +160,13 @@ interface ProcessMessageParams {
   text: string;
   attachments?: FileAttachment[];
   onTextDelta?: (delta: string) => void;
-  onToolStart?: (event: { id: string; name: string; input: Record<string, unknown> }) => void;
+  onToolStart?: (event: { id: string; name: string; input: Record<string, unknown> }) => void | Promise<void>;
   onToolResult?: (event: {
     toolUseId: string;
     content: string;
     isError: boolean;
     isFinal?: boolean;
-  }) => void;
+  }) => void | Promise<void>;
   /** Called when query completes — returns Promise to allow async flush of final message */
   onQueryResult?: (event: {
     sessionId: string;
@@ -316,10 +316,10 @@ export class ConversationEngine {
             params.onThinkingDelta?.(value.text);
             break;
           case 'tool_start':
-            params.onToolStart?.(value);
+            await params.onToolStart?.(value);
             break;
           case 'tool_result':
-            params.onToolResult?.(value);
+            await params.onToolResult?.(value);
             break;
           case 'query_result': {
             usage = value.usage;

@@ -14,6 +14,7 @@ vi.mock('@larksuiteoapi/node-sdk', () => ({
 import { FeishuAdapter } from '../../server/channels/feishu/adapter.js';
 import { fitsFeishuCard, measureFeishuCard } from '../../server/channels/feishu/card-budget.js';
 import { SubagentFlowPresenter } from '../../server/presentation/subagent-presenter.js';
+import { QueryPresentationFactory } from '../../server/engine/coordinators/query-presentation.js';
 
 interface Request { path?: { message_id: string }; data: { content: string; uuid?: string; reply_in_thread?: boolean } }
 let adapter: FeishuAdapter;
@@ -34,7 +35,7 @@ beforeEach(async () => {
   sdk.reply.mockImplementation(send); sdk.create.mockImplementation(send);
   sdk.patch.mockImplementation(async (request: Request) => { observed.push(structuredClone(request)); remote.set(request.path!.message_id, request.data.content); return { code: 0 }; });
   sdk.remove.mockImplementation(async ({ path }: { path: { message_id: string } }) => { remote.delete(path.message_id); return { code: 0 }; });
-  adapter = new FeishuAdapter({ appId: 'fixture-app', appSecret: 'fixture-secret', verificationToken: '', encryptKey: '', allowedUsers: ['owner'] }, {
+  adapter = new FeishuAdapter({ appId: 'fixture-app', appSecret: '[REDACTED]', verificationToken: '', encryptKey: '', allowedUsers: ['owner'] }, {
     botOpenId: 'fixture-bot', botName: 'fixture',
     cardFlow: { mode: 'blocks', groupGapTokens: 50, maxBytes: 4000, maxElements: 30, toolRules: {} },
   });
@@ -86,5 +87,38 @@ describe('real Feishu adapter/sender wiring for simultaneous compact child cards
     expect(Math.max(measureFeishuCard(remote.get(identities[0])!).bytes, measureFeishuCard(remote.get(identities[0])!).requestBytes)).toBeLessThanOrEqual(3000);
     for (const request of observed) expect(measureFeishuCard(request.data.content).requestBytes).toBeLessThanOrEqual(4000);
     for (const [request] of sdk.reply.mock.calls) { expect(request.path.message_id).toBe('root'); expect(request.data.reply_in_thread).toBe(true); }
+  });
+
+  it('creates a distinct post-delegation main stream through the real sender UUID cache', async () => {
+    const main = new QueryPresentationFactory({ defaultWorkdir: '/tmp/project' }).createTurn({
+      adapter,
+      msg: { channelType: 'feishu', chatId: 'chat', threadId: 'topic', messageId: 'parent',
+        replyTargetMessageId: 'root', replyInThread: true, userId: 'owner', text: 'fixture' },
+      binding: {}, sessionKey: 'main-session', typing: { stop: vi.fn() }, onMessageId: vi.fn(),
+      reactions: { permission: 'pin', processing: 'typing', stalled: 'clock' },
+    });
+    try {
+      main.renderer.onTextDelta('PREFIX_MAIN');
+      main.renderer.onToolStart('subagent', { agent: 'worker', task: 'fixture' }, 'a');
+      await main.renderer.flushProgress();
+      main.subagents!.update({ kind: 'subagent_snapshot', parentToolUseId: 'a', childId: '0', agentName: 'worker',
+        task: 'fixture', status: 'completed', timeline: [{ kind: 'text', blockId: 'child', text: 'CHILD_RESULT' }] });
+      await main.subagents!.flushTool('a');
+      main.renderer.onToolResult('a', '子代理执行完成', false);
+      main.renderer.onToolComplete('a');
+      const sealing = main.renderer.sealForContinuation();
+      await vi.advanceTimersByTimeAsync(2000); await sealing;
+      main.renderer.onTextDelta('SUFFIX_MAIN');
+      await main.renderer.onComplete();
+      await main.subagents!.finish();
+      expect(remote.size).toBe(3);
+      const [old, child, next] = [...remote.values()];
+      expect(old).toContain('PREFIX_MAIN'); expect(old).not.toContain('SUFFIX_MAIN');
+      expect(child).toContain('CHILD_RESULT');
+      expect(next).toContain('SUFFIX_MAIN'); expect(next).not.toContain('PREFIX_MAIN');
+      expect(new Set(sdk.reply.mock.calls.map(([request]) => request.data.uuid)).size).toBe(3);
+      expect(sdk.reply).toHaveBeenCalledTimes(3); expect(sdk.create).not.toHaveBeenCalled();
+      for (const request of observed) expect(fitsFeishuCard(request.data.content, { maxBytes: 4000, maxElements: 30, maxTables: 4 })).toBe(true);
+    } finally { main.renderer.dispose(); await main.subagents!.dispose(); }
   });
 });

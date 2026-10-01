@@ -104,6 +104,10 @@ export class QueryTurnRunner {
     let terminalEventSeen = false;
     let queryFailed = false;
     const childFlowToolIds = new Set<string>();
+    const runningPresentationTools = new Set<string>();
+    const startedPresentationTools = new Set<string>();
+    const finishedPresentationTools = new Set<string>();
+    const continuationCalls = new Set<string>();
 
     let liveSession: ReturnType<SDKEngine['getOrCreateSession']> | undefined;
     try {
@@ -180,17 +184,40 @@ export class QueryTurnRunner {
           if (visible) renderer.onTextDelta(visible);
         },
         onThinkingDelta: (delta) => renderer.onThinkingDelta(delta),
-        onToolStart: (event) => renderer.onToolStart(event.name, event.input, event.id),
-        onToolResult: (event) => {
-          // Display routing only: processMessage still consumes the full canonical result.
-          const visible = childFlowToolIds.has(event.toolUseId)
-            ? event.isFinal === false ? '子代理执行中；详细过程见各自进度卡。'
-              : event.isError ? '子代理未全部完成；请查看各自进度卡。'
-                : '子代理执行完成；详细过程见各自进度卡。'
+        onToolStart: async (event) => {
+          if (startedPresentationTools.has(event.id)) return;
+          startedPresentationTools.add(event.id);
+          if (!finishedPresentationTools.has(event.id)) runningPresentationTools.add(event.id);
+          renderer.onToolStart(event.name, event.input, event.id);
+          // Ensure delegation appears before its first physical child cards.
+          if (subagents && event.name === 'subagent') {
+            try { await renderer.flushProgress(); }
+            catch { renderer.onTextDelta('\n⚠️ 主卡更新暂时失败。\n'); }
+          }
+        },
+        onToolResult: async (event) => {
+          const childCall = childFlowToolIds.has(event.toolUseId);
+          if (childCall && event.isFinal === false) return; // Still running; do not pin a partial result.
+          if (event.isFinal !== false && finishedPresentationTools.has(event.toolUseId)) return;
+          // Display routing only: the model still receives the full original result.
+          const visible = childCall
+            ? event.isError ? '子代理未全部完成；请查看各自进度卡。'
+              : '子代理执行完成；详细过程见各自进度卡。'
             : event.content;
           renderer.onToolResult(event.toolUseId, visible, event.isError);
-          if (event.isFinal !== false) {
-            renderer.onToolComplete(event.toolUseId);
+          if (event.isFinal === false) return;
+          renderer.onToolComplete(event.toolUseId);
+          runningPresentationTools.delete(event.toolUseId);
+          finishedPresentationTools.add(event.toolUseId);
+          if (childCall) continuationCalls.add(event.toolUseId);
+          // A parallel group seals once, only after its other main tools settle.
+          if (subagents && continuationCalls.size && runningPresentationTools.size === 0) {
+            try {
+              for (const id of continuationCalls) await subagents.flushTool(id);
+            } catch { renderer.onTextDelta('\n⚠️ 子代理进度卡未能完整更新。\n'); }
+            try { await renderer.sealForContinuation(); }
+            catch { renderer.onTextDelta('\n⚠️ 主卡续接失败，后续内容暂保留在原卡。\n'); }
+            continuationCalls.clear();
           }
         },
         onSubagentSnapshot: (data) => {

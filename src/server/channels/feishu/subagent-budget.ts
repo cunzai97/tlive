@@ -18,6 +18,30 @@ const CHILD_ARRAYS = ['elements', 'columns', 'actions'] as const;
 const WRAPPERS = new Set(['collapsible_panel', 'column_set', 'column', 'action', 'form']);
 const TRUNCATED = '[较早内容已截断]\n';
 type Failure = 'failed' | 'interrupted';
+interface ToolTally { name: string; count: number; failures: number; interruptions: number; running: number; }
+function tally(name: string, status?: string): ToolTally {
+  const failure = failureOf(status);
+  return { name, count: 1, failures: failure === 'failed' ? 1 : 0,
+    interruptions: failure === 'interrupted' ? 1 : 0, running: status === 'running' ? 1 : 0 };
+}
+function mergedTallies(values: readonly ToolTally[]): ToolTally[] {
+  const result = new Map<string, ToolTally>();
+  for (const value of values) {
+    const existing = result.get(value.name);
+    if (!existing) result.set(value.name, { ...value });
+    else { existing.count += value.count; existing.failures += value.failures;
+      existing.interruptions += value.interruptions; existing.running += value.running; }
+  }
+  return [...result.values()];
+}
+function tallyText(values: readonly ToolTally[]): string {
+  return mergedTallies(values).map(value => [
+    value.name + (value.count > 1 ? `x${value.count}` : ''),
+    value.failures ? `❌失败${value.failures}` : '',
+    value.interruptions ? `⏹中断${value.interruptions}` : '',
+    value.running ? `⏳执行中${value.running}` : '',
+  ].filter(Boolean).join(' · ')).join('\n');
+}
 
 function failureOf(status?: string): Failure | undefined {
   if (status && /^(failed|failure|error)$/i.test(status)) return 'failed';
@@ -118,6 +142,7 @@ function clean(
   card: CardObject,
   reduced: Map<CardObject, 'tool' | 'text'>,
   failed: Set<CardObject>,
+  tallies: Map<CardObject, ToolTally[]>,
 ): void {
   const visit = (nodes: CardObject[]): CardObject[] => {
     const result: CardObject[] = [];
@@ -135,12 +160,14 @@ function clean(
       if (node.tag === 'collapsible_panel' && children.some(hasFailure)) node.expanded = true;
       result.push(node);
     }
-    // Merge adjacent name-only tools, retaining repeated names and chronological order.
+    // Count same names inside adjacent simplified regions, keeping first-seen order.
     const merged: CardObject[] = [];
     for (const node of result) {
       const previous = merged.at(-1);
       if (previous && reduced.get(previous) === 'tool' && reduced.get(node) === 'tool') {
-        previous.content += `\n${node.content}`;
+        const counts = mergedTallies([...(tallies.get(previous) ?? []), ...(tallies.get(node) ?? [])]);
+        tallies.set(previous, counts);
+        previous.content = literal(tallyText(counts));
         if (failed.has(node)) failed.add(previous);
       } else merged.push(node);
     }
@@ -246,6 +273,7 @@ export function compactSubagentCard(
     };
   });
   const reduced = new Map<CardObject, 'tool' | 'text'>();
+  const tallies = new Map<CardObject, ToolTally[]>();
   const failed = new Set<CardObject>();
 
   // One pass, oldest first. Each committed semantic downgrade checks the exact final JSON.
@@ -257,7 +285,9 @@ export function compactSubagentCard(
     const id = nodes[0].element_id;
     let replacement: CardObject | undefined;
     if (chunk.kind === 'tool') {
-      replacement = textElement(source.name + (failure ? ` · ${failureLabel(failure)}` : ''), id);
+      const counts = [tally(source.name, chunk.status)];
+      replacement = textElement(tallyText(counts), id);
+      tallies.set(replacement, counts);
       reduced.set(replacement, 'tool');
     } else if (chunk.kind === 'text') {
       replacement = textElement(TRUNCATED, id);
@@ -269,7 +299,7 @@ export function compactSubagentCard(
     }
     if (failure && replacement) failed.add(replacement);
     replaceNodes(output, ids, replacement);
-    clean(output, reduced, failed);
+    clean(output, reduced, failed, tallies);
     if (chunk.kind === 'text' && replacement) {
       const status = failure ? `${failureLabel(failure)}\n` : '';
       // Table/fence-heavy blocks can fit intact after literalization; don't falsely claim a cut.
@@ -298,14 +328,20 @@ export function compactSubagentCard(
   ].filter(Boolean).join(' · ');
   const minimalState = [failures ? '失败' : '', interruptions ? '中断' : '']
     .filter(Boolean).join('/');
-  const preview = [
-    ...present.flatMap((source) => {
-      if (source.chunk.kind === 'thinking') return [];
-      if (source.chunk.kind === 'text') return [source.text];
-      return [source.name + (source.failure ? ` · ${failureLabel(source.failure)}` : '')];
-    }),
-    extra,
-  ].filter(Boolean).join('\n');
+  const previewParts: string[] = [];
+  let pendingTools: ToolTally[] = [];
+  const flushTools = (): void => {
+    if (pendingTools.length) previewParts.push(tallyText(pendingTools));
+    pendingTools = [];
+  };
+  for (const source of present) {
+    if (source.chunk.kind === 'thinking') continue;
+    if (source.chunk.kind === 'tool') pendingTools.push(tally(source.name, source.chunk.status));
+    else { flushTools(); previewParts.push(source.text); }
+  }
+  flushTools();
+  previewParts.push(extra);
+  const preview = previewParts.filter(Boolean).join('\n');
   const prefixes = [
     `[较早内容已截断/省略${toolCount ? `；工具 ${toolCount} 次` : ''}]\n${state ? `${state}\n` : ''}`,
     `[省略]${minimalState ? ` ${minimalState}` : ''}\n`,
