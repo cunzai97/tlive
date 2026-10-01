@@ -453,7 +453,7 @@ export class FeishuFormatter implements MessageFormatter<FeishuRenderedMessage> 
       elements,
       nested ? undefined : buttons,
     );
-    if (this.options.nativeStreaming !== false && this.options.flowOptions?.mode !== 'legacy') {
+    if (this.options.nativeStreaming === true && this.options.flowOptions?.mode !== 'legacy') {
       message.feishuStreaming = {
         enabled:
           data.phase !== 'completed' &&
@@ -461,6 +461,8 @@ export class FeishuFormatter implements MessageFormatter<FeishuRenderedMessage> 
           data.phase !== 'waiting_permission',
         elementIds: progressStreamingElementIds(data, this.options.flowOptions),
       };
+    } else {
+      message.feishuSnapshot = true;
     }
     return message;
   }

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { FEISHU_SNAPSHOT_REFRESH_MS } from '../../../shared/feishu-card-config.js';
 import {
   applyNativeCard,
   createNativeCardState,
@@ -39,6 +40,7 @@ interface DeliveredPage {
   threadId?: string;
   native?: NativeCardState;
   nativeAttached?: boolean;
+  lastSnapshotPatchAt?: number;
   // Only confirmed SDK successes may become the planner's sealed prefix.
   plan?: PlannedFeishuCard;
 }
@@ -212,8 +214,18 @@ async function patchCard(
   messageId: string,
   content: string,
   budget: FeishuCardBudget,
+  snapshotPage?: DeliveredPage,
 ): Promise<void> {
   assertFeishuCardBudget(content, budget);
+  if (snapshotPage) {
+    // IM card updates are limited to 5 QPS for each physical message. Protect
+    // terminal/state transitions too, not only renderer text scheduling.
+    const delay = snapshotPage.lastSnapshotPatchAt === undefined
+      ? 0
+      : Math.max(0, snapshotPage.lastSnapshotPatchAt + FEISHU_SNAPSHOT_REFRESH_MS - Date.now());
+    if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
+    snapshotPage.lastSnapshotPatchAt = Date.now();
+  }
   checkedFeishuResult(
     await client.im.message.patch({
       path: { message_id: messageId },
@@ -310,7 +322,10 @@ async function deliverCards(
           );
         } else if (page.messageId) {
           if (page.plan?.content !== plan.content) {
-            await patchCard(client, page.messageId, plan.content, plan.budget ?? state.budget);
+            await patchCard(
+              client, page.messageId, plan.content, plan.budget ?? state.budget,
+              message.feishuSnapshot ? page : undefined,
+            );
           }
         } else {
           const result = await sendMessageContent(

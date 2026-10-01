@@ -8,6 +8,8 @@ export interface AdaptiveFlushOptions {
   veryFastOutputCharsPerSec?: number;
   highLatencyMs?: number;
   rateLimitBackoffMs?: number;
+  /** Count the interval from the previous request start, not from its completion. */
+  anchorToLastFlush?: boolean;
 }
 
 interface NextDelayInput {
@@ -15,6 +17,7 @@ interface NextDelayInput {
   content: string;
   phase: string;
   hasMessage: boolean;
+  lastFlushAt?: number;
 }
 
 const TEXT_RATE_WINDOW_MS = 2000;
@@ -29,6 +32,7 @@ export class AdaptiveFlushController {
   private readonly veryFastOutputCharsPerSec: number;
   private readonly highLatencyMs: number;
   private readonly rateLimitBackoffMs: number;
+  private readonly anchorToLastFlush: boolean;
   private textHistory: Array<{ at: number; chars: number }> = [];
   private lastLatencyMs = 0;
   private rateLimitedUntil = 0;
@@ -43,6 +47,7 @@ export class AdaptiveFlushController {
     this.veryFastOutputCharsPerSec = options.veryFastOutputCharsPerSec ?? 480;
     this.highLatencyMs = options.highLatencyMs ?? 600;
     this.rateLimitBackoffMs = options.rateLimitBackoffMs ?? 2000;
+    this.anchorToLastFlush = options.anchorToLastFlush ?? false;
   }
 
   recordTextDelta(chars: number, now = Date.now()): void {
@@ -78,7 +83,10 @@ export class AdaptiveFlushController {
 
     if (this.lastLatencyMs >= this.highLatencyMs) delay += 500;
 
-    return clamp(delay, this.minMs, this.maxMs);
+    const interval = clamp(delay, this.minMs, this.maxMs);
+    return this.anchorToLastFlush && input.lastFlushAt !== undefined
+      ? Math.max(0, interval - (now - input.lastFlushAt))
+      : interval;
   }
 
   private currentCharsPerSec(now: number): number {

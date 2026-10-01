@@ -40,15 +40,16 @@ describe('complete safety-relevant block content', () => {
 describe('Feishu card settings read from the supplied config reader', () => {
   const load = (values: Record<string, string | undefined> = {}) => readFeishuCardFlowSettings((name, fallback) => values[name] ?? fallback ?? '');
   it('has explicit safe defaults and supports the legacy switch', () => {
-    expect(load()).toEqual({ mode: 'blocks', nativeStreaming: true, groupGapTokens: 50, maxBytes: 24000, maxElements: 160, toolRules: {} });
+    expect(load()).toEqual({ mode: 'blocks', nativeStreaming: false, groupGapTokens: 50, maxBytes: 24000, maxElements: 160, toolRules: {} });
     expect(load({ TL_FS_CARD_FLOW: 'legacy' }).mode).toBe('legacy');
     expect(load({ TL_FS_NATIVE_STREAMING: 'false' }).nativeStreaming).toBe(false);
+    expect(load({ TL_FS_NATIVE_STREAMING: 'true' }).nativeStreaming).toBe(true);
   });
   it('does not depend on process.env and preserves user tool identifiers', () => {
     expect(load({
       TL_FS_CARD_MAX_BYTES: '8000', TL_FS_CARD_MAX_ELEMENTS: '80', TL_FS_TOOL_GROUP_GAP_TOKENS: '0',
       TL_FS_TOOL_DISPLAY_RULES: '{"grab":"exploration","MyEditor":"edit"}',
-    })).toEqual({ mode: 'blocks', nativeStreaming: true, groupGapTokens: 0, maxBytes: 8000, maxElements: 80, toolRules: { grab: 'exploration', MyEditor: 'edit' } });
+    })).toEqual({ mode: 'blocks', nativeStreaming: false, groupGapTokens: 0, maxBytes: 8000, maxElements: 80, toolRules: { grab: 'exploration', MyEditor: 'edit' } });
   });
   it.each([
     { TL_FS_CARD_MAX_BYTES: '30000' }, { TL_FS_CARD_MAX_ELEMENTS: '201' },

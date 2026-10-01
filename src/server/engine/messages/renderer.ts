@@ -513,6 +513,7 @@ export class MessageRenderer {
           content,
           phase: renderInput.phase,
           hasMessage: !!this._messageId,
+          lastFlushAt: this.lastFlushTime,
         })
       : this._messageId
         ? this.throttleMs

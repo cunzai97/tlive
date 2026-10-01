@@ -252,7 +252,7 @@ export class FeishuAdapter extends BaseChannelAdapter<FeishuRenderedMessage> {
   override usesNativeProgressStreaming(): boolean {
     return (
       this.options.cardFlow?.mode !== 'legacy' &&
-      this.options.cardFlow?.nativeStreaming !== false &&
+      this.options.cardFlow?.nativeStreaming === true &&
       !!this.client &&
       hasNativeCardApi(this.client)
     );
@@ -381,7 +381,7 @@ export class FeishuAdapter extends BaseChannelAdapter<FeishuRenderedMessage> {
       registry.register(name, category === 'edit' ? 'editing' : category);
     }
     this.formatter = new FeishuFormatter('zh', {
-      nativeStreaming: this.options.cardFlow?.nativeStreaming ?? true,
+      nativeStreaming: this.options.cardFlow?.nativeStreaming ?? false,
       doneButtons: this.options.doneButtons,
       flowOptions: {
         mode: this.options.cardFlow?.mode ?? 'blocks',

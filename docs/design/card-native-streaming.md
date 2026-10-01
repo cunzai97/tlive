@@ -1,5 +1,7 @@
 # 飞书原生流式恢复：设计与本地验证
 
+> 本文件记录历史 CardKit 打字动画版本。当前默认已按用户明确要求改为无动画的 200ms 最新快照刷新，见 [snapshot-refresh-200ms.md](snapshot-refresh-200ms.md)；下文原生默认开启的描述不再是当前默认配置。
+
 ## 范围和回退
 
 - 工作区：`/home/pan/work/tlive-card-native-streaming`；分支：`feat/card-native-streaming`。

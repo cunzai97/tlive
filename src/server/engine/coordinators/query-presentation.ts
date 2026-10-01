@@ -1,6 +1,7 @@
 import type { BaseChannelAdapter } from '../../channels/base.js';
 import type { InboundMessage } from '../../channels/types.js';
 import { FEISHU_MESSAGE_LIMIT } from '../../channels/limits.js';
+import { FEISHU_SNAPSHOT_REFRESH_MS } from '../../../shared/feishu-card-config.js';
 import { withInboundReplyContext } from '../../channels/reply-context.js';
 import { t } from '../../../shared/i18n/index.js';
 import { MessageRenderer } from '../messages/renderer.js';
@@ -57,18 +58,20 @@ export class QueryPresentationFactory {
       onMessageId,
     });
 
-    const nativeStreaming = adapter.usesNativeProgressStreaming?.() ?? false;
+    const fastSnapshots = adapter.channelType === 'feishu';
     renderer = new MessageRenderer({
       // FeishuSender owns the combined byte/table split and its message-id topology.
       // Supplying a predicate disables MessageRenderer's generic size-estimation fallback.
       shouldSplitState: () => false,
       channelOwnsPagination: adapter.channelType === 'feishu',
       platformLimit: FEISHU_MESSAGE_LIMIT,
-      throttleMs: nativeStreaming ? 250 : 300,
+      throttleMs: fastSnapshots ? FEISHU_SNAPSHOT_REFRESH_MS : 300,
       adaptiveFlush: {
-        baseMs: nativeStreaming ? 250 : 800,
-        minMs: nativeStreaming ? 250 : 800,
-        maxMs: nativeStreaming ? 1200 : 4000,
+        // Feishu snapshots follow a fixed target cadence, not the animation pace.
+        baseMs: fastSnapshots ? FEISHU_SNAPSHOT_REFRESH_MS : 800,
+        minMs: fastSnapshots ? FEISHU_SNAPSHOT_REFRESH_MS : 800,
+        maxMs: fastSnapshots ? FEISHU_SNAPSHOT_REFRESH_MS : 4000,
+        anchorToLastFlush: fastSnapshots,
         sizePenaltyStartBytes: 10 * 1024,
         largeSizePenaltyStartBytes: 20 * 1024,
         fastOutputCharsPerSec: 240,

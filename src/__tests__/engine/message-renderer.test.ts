@@ -65,6 +65,30 @@ describe('MessageRenderer', () => {
     }, 1000)).toBe(60_000);
   });
 
+  it('uses a 200ms start-anchored cadence despite long/fast output and slow network latency', () => {
+    const controller = new AdaptiveFlushController({
+      baseMs: 200, minMs: 200, maxMs: 200, anchorToLastFlush: true,
+    });
+    controller.recordTextDelta(10000, 1000);
+    controller.recordFlushLatency(1200);
+    const input = { fallbackMs: 200, content: 'x'.repeat(30000), phase: 'executing',
+      hasMessage: true, lastFlushAt: 1000 };
+    expect(controller.nextDelay(input, 1000)).toBe(200);
+    expect(controller.nextDelay(input, 1150)).toBe(50);
+    expect(controller.nextDelay(input, 1200)).toBe(0);
+    expect(controller.nextDelay(input, 2200)).toBe(0);
+    expect(controller.nextDelay({ ...input, hasMessage: false }, 1000)).toBe(0);
+  });
+
+  it('does not subtract elapsed cadence time from an explicit rate-limit backoff', () => {
+    const controller = new AdaptiveFlushController({
+      baseMs: 200, minMs: 200, maxMs: 200, anchorToLastFlush: true,
+    });
+    controller.recordRateLimit(5000, 1000);
+    expect(controller.nextDelay({ fallbackMs: 200, content: 'latest', phase: 'executing',
+      hasMessage: true, lastFlushAt: 0 }, 2000)).toBe(4000);
+  });
+
   it('renders executing progress with accumulated visible tools and quiet-mode suppression', async () => {
     const r = createRenderer();
     r.onToolStart('Bash');

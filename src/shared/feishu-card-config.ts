@@ -1,5 +1,7 @@
 import type { ConfigValueReader } from './config.js';
 
+export const FEISHU_SNAPSHOT_REFRESH_MS = 200;
+
 export type FeishuToolCategory = 'exploration' | 'execution' | 'edit' | 'generic';
 
 export interface FeishuCardFlowSettings {
@@ -32,7 +34,7 @@ export function readFeishuCardFlowSettings(get: ConfigValueReader): FeishuCardFl
   if (mode !== 'blocks' && mode !== 'legacy') {
     throw new Error('Config error: TL_FS_CARD_FLOW must be blocks or legacy');
   }
-  const nativeStreaming = get('TL_FS_NATIVE_STREAMING', 'true');
+  const nativeStreaming = get('TL_FS_NATIVE_STREAMING', 'false');
   if (nativeStreaming !== 'true' && nativeStreaming !== 'false') {
     throw new Error('Config error: TL_FS_NATIVE_STREAMING must be true or false');
   }
