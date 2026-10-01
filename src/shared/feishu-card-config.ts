@@ -1,6 +1,6 @@
 import type { ConfigValueReader } from './config.js';
 
-export const FEISHU_SNAPSHOT_REFRESH_MS = 200;
+export const FEISHU_SNAPSHOT_REFRESH_MS = 400;
 
 export type FeishuToolCategory = 'exploration' | 'execution' | 'edit' | 'generic';
 

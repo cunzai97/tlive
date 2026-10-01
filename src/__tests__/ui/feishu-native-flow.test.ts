@@ -375,8 +375,8 @@ async function withSnapshotTurn(
   finally { turn.renderer.dispose(); await ordinary.stop(); }
 }
 
-describe('200ms latest-state snapshots without a typing animation', () => {
-  it('shows the first thought immediately and replaces long/fast output at 200ms without CardKit', async () => {
+describe('400ms latest-state snapshots without a typing animation', () => {
+  it('shows the first thought immediately and replaces long/fast output at 400ms without CardKit', async () => {
     await withSnapshotTurn(async (turn, ordinary) => {
       expect(ordinary.usesNativeProgressStreaming()).toBe(false);
       expect(ordinary.format({ type: 'progress', chatId: 'chat', data: progress([]) }).feishuStreaming).toBeUndefined();
@@ -391,15 +391,15 @@ describe('200ms latest-state snapshots without a typing animation', () => {
       expect(nodes(remoteMessage(id)).find((node) => node.tag === 'collapsible_panel')!.expanded).toBe(true);
       expect(messages.get(id)).toContain('第一段思考');
       turn.renderer.onThinkingDelta('，继续分析');
-      await vi.advanceTimersByTimeAsync(199);
+      await vi.advanceTimersByTimeAsync(399);
       expect(sdk.imPatch).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(1);
-      expect(updates.map(time => time - start)).toEqual([200]);
+      expect(updates.map(time => time - start)).toEqual([400]);
       expect(messages.get(id)).toContain('第一段思考，继续分析');
       const text = '正文' + 'x'.repeat(12000);
       turn.renderer.onTextDelta(text);
-      await vi.advanceTimersByTimeAsync(200);
-      expect(updates.map(time => time - start)).toEqual([200, 400]);
+      await vi.advanceTimersByTimeAsync(400);
+      expect(updates.map(time => time - start)).toEqual([400, 800]);
       expect(messages.get(id)).toContain(text);
       expect(nodes(remoteMessage(id)).find((node) => node.tag === 'collapsible_panel')!.expanded).toBe(false);
       await vi.advanceTimersByTimeAsync(1000);
@@ -417,7 +417,7 @@ describe('200ms latest-state snapshots without a typing animation', () => {
     });
   });
 
-  it('does not add another 200ms after a slow first send and coalesces its pending deltas', async () => {
+  it('does not add another 400ms after a slow first send and coalesces its pending deltas', async () => {
     await withSnapshotTurn(async (turn) => {
       const send = sdk.imReply.getMockImplementation()!;
       sdk.imReply.mockImplementationOnce(async (...args) => {
@@ -436,8 +436,8 @@ describe('200ms latest-state snapshots without a typing animation', () => {
       expect(sdk.imReply).toHaveBeenCalledTimes(1);
       expect(sdk.imPatch).not.toHaveBeenCalled();
       turn.renderer.onThinkingDelta('四');
-      await vi.advanceTimersByTimeAsync(50);
-      expect(updates.map(time => time - start)).toEqual([200]);
+      await vi.advanceTimersByTimeAsync(250);
+      expect(updates.map(time => time - start)).toEqual([400]);
       expect([...messages.values()][0]).toContain('一二三四');
       expect(sdk.imReply).toHaveBeenCalledTimes(1);
       await settle(turn.renderer.onComplete());
@@ -459,7 +459,7 @@ describe('200ms latest-state snapshots without a typing animation', () => {
       turn.renderer.onThinkingDelta('开始');
       await vi.advanceTimersByTimeAsync(0);
       turn.renderer.onThinkingDelta('第一批');
-      await vi.advanceTimersByTimeAsync(200);
+      await vi.advanceTimersByTimeAsync(400);
       for (const delta of ['二', '三', '四', '五', '最新']) {
         await vi.advanceTimersByTimeAsync(100);
         turn.renderer.onThinkingDelta(delta);
@@ -468,7 +468,7 @@ describe('200ms latest-state snapshots without a typing animation', () => {
       // A zero-delay continuation runs on the next timer tick, not inside the
       // just-completed request's callback.
       await vi.advanceTimersByTimeAsync(1);
-      expect(updates.map(update => update.at - start)).toEqual([200, 801]);
+      expect(updates.map(update => update.at - start)).toEqual([400, 1001]);
       expect(updates[1].content).toContain('开始第一批二三四五最新');
       expect(maxInflight).toBe(1);
       await vi.advanceTimersByTimeAsync(600);
@@ -480,7 +480,7 @@ describe('200ms latest-state snapshots without a typing animation', () => {
     });
   });
 
-  it('protects each physical snapshot message at 200ms even for rapid terminal/state changes', async () => {
+  it('protects each physical snapshot message at 400ms even for rapid terminal/state changes', async () => {
     await withSnapshotTurn(async (_turn, ordinary) => {
       const render = (text: string, phase: ProgressData['phase'] = 'executing') => ordinary.format({
         type: 'progress', chatId: 'chat', data: progress([{ kind: 'text', blockId: 'answer', text }], { phase }),
@@ -497,13 +497,13 @@ describe('200ms latest-state snapshots without a typing animation', () => {
       const terminal = ordinary.editMessage('chat', sent.messageId, render('ABCD', 'completed'));
       await vi.advanceTimersByTimeAsync(0);
       expect(updates.map(time => time - start)).toEqual([0]);
-      await vi.advanceTimersByTimeAsync(199);
+      await vi.advanceTimersByTimeAsync(399);
       expect(updates).toHaveLength(1);
       await vi.advanceTimersByTimeAsync(1);
-      expect(updates.map(time => time - start)).toEqual([0, 200]);
-      await vi.advanceTimersByTimeAsync(200);
+      expect(updates.map(time => time - start)).toEqual([0, 400]);
+      await vi.advanceTimersByTimeAsync(400);
       await Promise.all([first, second, terminal]);
-      expect(updates.map(time => time - start)).toEqual([0, 200, 400]);
+      expect(updates.map(time => time - start)).toEqual([0, 400, 800]);
       expect(messages.get(sent.messageId)).toContain('ABCD');
       expect(sdk.imCreate).toHaveBeenCalledTimes(1);
     });
