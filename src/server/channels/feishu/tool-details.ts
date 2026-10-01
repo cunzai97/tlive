@@ -671,6 +671,7 @@ function scopeRoute(scope: Scope): FeishuRenderedMessage {
     receiveIdType: scope.receiveIdType,
     replyToMessageId: scope.replyToMessageId,
     replyInThread: scope.replyInThread,
+    feishuSingleCard: true,
   };
 }
 

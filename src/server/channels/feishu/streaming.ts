@@ -1,6 +1,6 @@
 /**
  * Progressive, lossless Feishu session. The same checked multi-card sender owns
- * create/update/close; native CardKit printing is deliberately not used here.
+ * create/update/close; native CardKit printing is used when the SDK supports it.
  * This prevents a small element update from overflowing its cumulative card and
  * makes partially delivered continuations retryable without truncation.
  */
@@ -52,13 +52,14 @@ export class FeishuStreamingSession {
     return operation;
   }
 
-  private message(text: string, header = this.header): FeishuRenderedMessage {
+  private message(text: string, header = this.header, finish = false): FeishuRenderedMessage {
     return {
       chatId: this.options.chatId,
       receiveIdType: this.options.receiveIdType,
       replyToMessageId: this.options.replyToMessageId,
       replyInThread: this.options.replyInThread,
       deliveryId: this.deliveryId,
+      feishuStreaming: { enabled: !finish, elementIds: ['stream_content'] },
       feishuHeader: header,
       text,
     };
@@ -82,14 +83,14 @@ export class FeishuStreamingSession {
     });
   }
 
-  private async apply(text: string, header = this.header): Promise<void> {
+  private async apply(text: string, header = this.header, finish = false): Promise<void> {
     if (!this.messageId) throw new Error('Feishu streaming session has not started');
     const delay = this.throttleMs - (Date.now() - this.lastUpdateTime);
     if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
     await editFeishuMessage(
       this.options.client,
       this.messageId,
-      this.message(text, header),
+      this.message(text, header, finish),
       this.classifyError,
     );
     // Commit only after every page is confirmed; a failed update remains retryable.
@@ -113,7 +114,11 @@ export class FeishuStreamingSession {
     return this.serialize(async () => {
       if (this.closed) return;
       if (!this.messageId) throw new Error('Feishu streaming session has not started');
-      await this.apply(options?.finalText ?? this.lastContent, options?.header ?? this.header);
+      await this.apply(
+        options?.finalText ?? this.lastContent,
+        options?.header ?? this.header,
+        true,
+      );
       this.closed = true;
     });
   }

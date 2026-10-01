@@ -1,4 +1,12 @@
 import { randomUUID } from 'node:crypto';
+import {
+  applyNativeCard,
+  createNativeCardState,
+  ensureNativeCard,
+  hasNativeCardApi,
+  prepareNativeCard,
+  type NativeCardState,
+} from './native-streaming.js';
 import type { Client } from '@larksuiteoapi/node-sdk';
 import type { BridgeError } from '../errors.js';
 import type { SendResult, ThreadStartResult } from '../types.js';
@@ -29,6 +37,8 @@ interface DeliveredPage {
   uuid: string;
   messageId?: string;
   threadId?: string;
+  native?: NativeCardState;
+  nativeAttached?: boolean;
   // Only confirmed SDK successes may become the planner's sealed prefix.
   plan?: PlannedFeishuCard;
 }
@@ -174,11 +184,26 @@ function isThreadReplyUnsupported(err: unknown): boolean {
 
 function cardForMessage(message: FeishuRenderedMessage): CardObject {
   const raw = message.text ? message.text : markdownToFeishu(message.html ?? '');
-  return JSON.parse(
+  const card = JSON.parse(
     message.feishuElements
       ? buildStructuredCardForMessage(message)
       : buildPlainCard(raw, message.feishuButtons ?? message.buttons, message.feishuHeader),
   );
+  if (message.feishuStreaming && !message.feishuElements) {
+    card.body.elements[0].element_id = 'stream_content';
+  }
+  return card;
+}
+
+function cardHasElement(content: string, elementId?: string): boolean {
+  if (!elementId) return false;
+  const visit = (value: unknown): boolean => {
+    if (!value || typeof value !== 'object') return false;
+    if (Array.isArray(value)) return value.some(visit);
+    const node = value as Record<string, unknown>;
+    return node.element_id === elementId || Object.values(node).some(visit);
+  };
+  return visit(JSON.parse(content));
 }
 
 /** Every interactive SDK boundary checks the complete, final serialized card. */
@@ -203,7 +228,14 @@ async function deliverCards(
   message: FeishuRenderedMessage,
   allowReplyFallback = true,
 ): Promise<string> {
-  const card = cardForMessage(message);
+  const useNative =
+    hasNativeCardApi(client) &&
+    (!!message.feishuStreaming || state.pages.some((page) => !!page.native));
+  const prepared = useNative
+    ? prepareNativeCard(cardForMessage(message), message.feishuStreaming?.elementIds ?? [])
+    : undefined;
+  const card = prepared?.card ?? cardForMessage(message);
+  const streamIds = prepared?.streamElementIds ?? [];
   let reductions = 0;
   let replanFrom = Number.POSITIVE_INFINITY;
   let failedIndex = 0;
@@ -216,13 +248,67 @@ async function deliverCards(
       // Empty sealed slots preserve indices in the middle, but a removed tail
       // must be withdrawn rather than kept as indefinitely blank overflow cards.
       while (plans.length > 1 && plans[plans.length - 1].slices.length === 0) plans.pop();
+      if (message.feishuSingleCard && plans.length !== 1) {
+        throw new Error('A detail navigation page cannot be split into multiple messages');
+      }
+      const lastStreamId = streamIds.at(-1);
+      let activePageIndex = -1;
+      plans.forEach((plan, index) => {
+        if (
+          (lastStreamId && plan.elementIds?.[lastStreamId]?.length) ||
+          cardHasElement(plan.content, lastStreamId)
+        )
+          activePageIndex = index;
+      });
       for (let index = 0; index < plans.length; index++) {
         failedIndex = index;
         const plan = plans[index];
         const page = state.pages[index] ?? { uuid: randomUUID() };
         // Persist the UUID before the request: retries after lost responses are idempotent.
         state.pages[index] = page;
-        if (page.messageId) {
+        if (useNative) {
+          page.native ??= createNativeCardState();
+          const budget = plan.budget ?? state.budget;
+          const pageStreamIds = streamIds.flatMap((id) => plan.elementIds?.[id] ?? []);
+          // Validate the complete entity, not merely the tiny IM card-id reference.
+          const cardId = await ensureNativeCard(
+            client,
+            page.native,
+            plan.content,
+            budget,
+            pageStreamIds,
+          );
+          const reference = JSON.stringify({ type: 'card', data: { card_id: cardId } });
+          if (!page.messageId) {
+            const result = await sendMessageContent(
+              client,
+              message,
+              'interactive',
+              reference,
+              page.uuid,
+              budget,
+              allowReplyFallback,
+            );
+            if (!result?.data?.message_id)
+              throw new Error('Native card send returned no message_id');
+            page.messageId = String(result.data.message_id);
+            page.threadId = result.data.thread_id;
+            page.nativeAttached = true;
+            rememberDelivery(client, state);
+          } else if (!page.nativeAttached) {
+            // Recover a previously ordinary progress bubble in place, without a duplicate send.
+            await patchCard(client, page.messageId, reference, budget);
+            page.nativeAttached = true;
+          }
+          await applyNativeCard(
+            client,
+            page.native,
+            plan.content,
+            budget,
+            pageStreamIds,
+            !message.feishuStreaming?.enabled || index !== activePageIndex,
+          );
+        } else if (page.messageId) {
           if (page.plan?.content !== plan.content) {
             await patchCard(client, page.messageId, plan.content, plan.budget ?? state.budget);
           }
@@ -248,6 +334,16 @@ async function deliverCards(
       for (let index = state.pages.length - 1; index >= plans.length; index--) {
         const page = state.pages[index];
         if (page.messageId) {
+          if (page.native && page.plan) {
+            await applyNativeCard(
+              client,
+              page.native,
+              page.plan.content,
+              page.plan.budget ?? state.budget,
+              [],
+              true,
+            );
+          }
           checkedFeishuResult(
             await client.im.message.delete({
               path: { message_id: page.messageId },
@@ -469,7 +565,11 @@ export function shouldSplitFeishuProgressMessage(
   message: FeishuRenderedMessage,
   client?: Client,
 ): boolean {
-  return planFeishuCards(cardForMessage(message), getFeishuCardBudget(client)).length > 1;
+  const card =
+    message.feishuStreaming && (!client || hasNativeCardApi(client))
+      ? prepareNativeCard(cardForMessage(message), message.feishuStreaming.elementIds).card
+      : cardForMessage(message);
+  return planFeishuCards(card, getFeishuCardBudget(client)).length > 1;
 }
 
 function buildStructuredCardForMessage(message: FeishuRenderedMessage): string {

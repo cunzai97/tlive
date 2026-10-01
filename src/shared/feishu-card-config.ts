@@ -4,6 +4,7 @@ export type FeishuToolCategory = 'exploration' | 'execution' | 'edit' | 'generic
 
 export interface FeishuCardFlowSettings {
   mode: 'blocks' | 'legacy';
+  nativeStreaming?: boolean;
   groupGapTokens: number;
   maxBytes: number;
   maxElements: number;
@@ -31,6 +32,10 @@ export function readFeishuCardFlowSettings(get: ConfigValueReader): FeishuCardFl
   if (mode !== 'blocks' && mode !== 'legacy') {
     throw new Error('Config error: TL_FS_CARD_FLOW must be blocks or legacy');
   }
+  const nativeStreaming = get('TL_FS_NATIVE_STREAMING', 'true');
+  if (nativeStreaming !== 'true' && nativeStreaming !== 'false') {
+    throw new Error('Config error: TL_FS_NATIVE_STREAMING must be true or false');
+  }
   let decoded: unknown;
   try {
     decoded = JSON.parse(get('TL_FS_TOOL_DISPLAY_RULES', '{}'));
@@ -49,6 +54,7 @@ export function readFeishuCardFlowSettings(get: ConfigValueReader): FeishuCardFl
   }
   return {
     mode,
+    nativeStreaming: nativeStreaming === 'true',
     groupGapTokens: readInteger(get, 'TL_FS_TOOL_GROUP_GAP_TOKENS', 50, 0, 10_000),
     maxBytes: readInteger(get, 'TL_FS_CARD_MAX_BYTES', 24_000, 4_000, 28_000),
     maxElements: readInteger(get, 'TL_FS_CARD_MAX_ELEMENTS', 160, 10, 190),

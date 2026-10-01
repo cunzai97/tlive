@@ -28,6 +28,10 @@ export interface FeishuRenderedMessage {
   deliveryId?: string;
   /** Authorized original requester for file-detail buttons. */
   flowDetailUserId?: string;
+  /** One physical message per detail navigation page; never silently emit overflow siblings. */
+  feishuSingleCard?: boolean;
+  /** Native CardKit transport for progress; not part of the platform card JSON. */
+  feishuStreaming?: { enabled: boolean; elementIds: string[] };
   /** Media attachment */
   media?: import('../../../shared/media/attachments.js').MediaAttachment;
 }

@@ -61,6 +61,7 @@ import {
   buildProgressTimelineElements,
   buildProgressContentElements,
   progressHeaderConfig,
+  progressStreamingElementIds,
 } from './format-progress.js';
 import { buildStatusElements } from './format-status.js';
 import { actionCallback } from '../../../shared/core/callbacks.js';
@@ -75,6 +76,7 @@ import type { FeishuToolDetails } from './tool-details.js';
 export interface FeishuFormatterOptions extends MessageFormatterOptions {
   flowOptions?: FlowOptions;
   toolDetails?: FeishuToolDetails;
+  nativeStreaming?: boolean;
 }
 
 function compactReleaseNotes(notes?: string): string {
@@ -271,9 +273,7 @@ export class FeishuFormatter implements MessageFormatter<FeishuRenderedMessage> 
   }
 
   formatTaskStart(chatId: string, data: TaskStartData): FeishuRenderedMessage {
-    const title = data.isNewSession
-      ? t('format.titleTaskReset')
-      : t('format.titleTaskStart');
+    const title = data.isNewSession ? t('format.titleTaskReset') : t('format.titleTaskStart');
     const elements: FeishuCardElement[] = [
       this.md(
         `**${t('format.labelCurrentConfig')}**\n${t('format.labelDirectory')}：${data.cwd}\n${t('home.labelPermission')}：${data.permissionMode === 'on' ? t('perm.labelModeOn') : t('perm.labelModeOff')}`,
@@ -309,9 +309,7 @@ export class FeishuFormatter implements MessageFormatter<FeishuRenderedMessage> 
         chatId,
         {
           template: data.hasError ? 'red' : 'green',
-          title: data.hasError
-            ? t('format.titleTaskEnd')
-            : t('format.titleTaskSummary'),
+          title: data.hasError ? t('format.titleTaskEnd') : t('format.titleTaskSummary'),
         },
         elements,
       );
@@ -320,9 +318,7 @@ export class FeishuFormatter implements MessageFormatter<FeishuRenderedMessage> 
       chatId,
       {
         template: data.hasError ? 'red' : 'green',
-        title: data.hasError
-          ? t('format.titleTaskEnd')
-          : t('format.titleTaskSummary'),
+        title: data.hasError ? t('format.titleTaskEnd') : t('format.titleTaskSummary'),
       },
       elements,
       buttons,
@@ -393,11 +389,9 @@ export class FeishuFormatter implements MessageFormatter<FeishuRenderedMessage> 
 
   formatNewSession(chatId: string, data: NewSessionData): FeishuRenderedMessage {
     const cwdLabel = data.cwd ? ` in \`${data.cwd}\`` : '';
-    return this.createCardMessage(
-      chatId,
-      { template: 'green', title: t('newSession.title') },
-      [this.md(`${t('newSession.title')}${cwdLabel}`)],
-    );
+    return this.createCardMessage(chatId, { template: 'green', title: t('newSession.title') }, [
+      this.md(`${t('newSession.title')}${cwdLabel}`),
+    ]);
   }
 
   formatError(chatId: string, data: { title: string; message: string }): FeishuRenderedMessage {
@@ -412,7 +406,8 @@ export class FeishuFormatter implements MessageFormatter<FeishuRenderedMessage> 
       data = {
         ...data,
         timeline: data.timeline.map((entry) => {
-          if (entry.kind !== 'tool' || registry.category(entry.toolName ?? '') !== 'editing') return entry;
+          if (entry.kind !== 'tool' || registry.category(entry.toolName ?? '') !== 'editing')
+            return entry;
           const detailId = this.options.toolDetails!.register(chatId, {
             ...entry,
             toolId: data.turnId && entry.toolId ? `${data.turnId}:${entry.toolId}` : entry.toolId,
@@ -450,11 +445,24 @@ export class FeishuFormatter implements MessageFormatter<FeishuRenderedMessage> 
       data.actionButtons !== undefined
         ? data.actionButtons
         : this.defaultProgressButtons(data.phase);
-    if (this.shouldNestDoneButtons(data.phase, data.footerLine)) {
-      elements.push(this.footerActionPanel(data.footerLine, buttons));
-      return this.createCardMessage(chatId, headerConfig, elements);
+    const nested = this.shouldNestDoneButtons(data.phase, data.footerLine);
+    if (nested) elements.push(this.footerActionPanel(data.footerLine!, buttons));
+    const message = this.createCardMessage(
+      chatId,
+      headerConfig,
+      elements,
+      nested ? undefined : buttons,
+    );
+    if (this.options.nativeStreaming !== false && this.options.flowOptions?.mode !== 'legacy') {
+      message.feishuStreaming = {
+        enabled:
+          data.phase !== 'completed' &&
+          data.phase !== 'failed' &&
+          data.phase !== 'waiting_permission',
+        elementIds: progressStreamingElementIds(data, this.options.flowOptions),
+      };
     }
-    return this.createCardMessage(chatId, headerConfig, elements, buttons);
+    return message;
   }
 
   formatCardResolution(chatId: string, data: CardResolutionData): FeishuRenderedMessage {
@@ -490,9 +498,7 @@ export class FeishuFormatter implements MessageFormatter<FeishuRenderedMessage> 
       .join('\n');
     const elements: FeishuCardElement[] = [this.md(summary)];
     if (releaseNotes) {
-      elements.push(
-        this.md(`**${t('version.notes')}**\n${truncate(releaseNotes, 360)}`),
-      );
+      elements.push(this.md(`**${t('version.notes')}**\n${truncate(releaseNotes, 360)}`));
     }
     const buttons: Button[] = [
       {

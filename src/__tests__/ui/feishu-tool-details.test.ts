@@ -362,6 +362,18 @@ describe('FeishuToolDetails snapshot and scoped SDK integration', () => {
     expect(mock.reply).toHaveBeenCalledTimes(2);
   });
 
+  it('does not silently split one navigation page into overflow messages after a server limit rejection', async () => {
+    const details = store({ pageBytes: 4000 }); const mock = sdk();
+    configureFeishuCardBudget(mock.client, { maxBytes: 4000, maxElements: 60 });
+    const id = details.register('chat', entry({ inputData: { path: '/x', content: 'x'.repeat(12000) } }))!;
+    bind(details, id);
+    mock.reply.mockRejectedValueOnce(Object.assign(new Error('card too large'), { code: 230025 }));
+    expect(responseType(await open(details, id, mock.client))).toBe('error');
+    expect(mock.reply).toHaveBeenCalledTimes(1);
+    expect(mock.create).not.toHaveBeenCalled();
+    expect(mock.del).not.toHaveBeenCalled();
+  });
+
   it('never reads a file or re-executes tools while registering or viewing snapshots', async () => {
     const reads = [vi.spyOn(fs, 'readFileSync'), vi.spyOn(fsPromises, 'readFile')];
     const executes = [vi.spyOn(childProcess, 'execFile'), vi.spyOn(childProcess, 'execSync')];

@@ -11,6 +11,7 @@ import {
 } from './format-progress-legacy.js';
 import {
   buildFlowBlocks,
+  collectFlowItems,
   isFlowTerminal,
   type FlowOptions,
   type FlowTextBlock,
@@ -30,6 +31,21 @@ export interface FormatProgressParams {
   md: (content: string) => FeishuCardElement;
   locale: Locale;
   flowOptions?: FlowOptions;
+}
+
+/** The exact semantic text IDs used by the block renderer, including nested thoughts. */
+export function progressStreamingElementIds(
+  data: ProgressData,
+  options: FlowOptions = {},
+): string[] {
+  // Identity does not depend on grouping. Do not invoke an exact tokenizer twice per flush.
+  const items = collectFlowItems(data, options.registry ?? createDefaultToolDisplayRegistry());
+  if (isFlowTerminal(data) && data.completedTraceOnly) {
+    while (items[items.length - 1]?.kind === 'text') items.pop();
+  }
+  return items
+    .filter((item) => item.kind !== 'tool' && item.text.trim())
+    .map((item) => flowElementId('text', item.id ?? item.kind));
 }
 
 function textElements(block: FlowTextBlock, params: FormatProgressParams): FeishuCardElement[] {

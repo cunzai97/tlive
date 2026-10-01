@@ -131,6 +131,8 @@ export interface PlannedFeishuCard {
   /** Confirmed historical pages retain their validated budget on a tail-only retry. */
   budget?: FeishuCardBudget;
   content: string;
+  /** Source component IDs to the actual IDs in this serialized physical card. */
+  elementIds?: Record<string, string[]>;
   slices: CardSlice[];
   sealed: boolean;
 }
@@ -283,7 +285,9 @@ function renderCard(
   page: number,
   continued: Set<string>,
   later: Set<string>,
+  elementIds?: Record<string, string[]>,
 ): string {
+  const sourceById = new Map<string, string>();
   const selections = new Map<string, CardSlice[]>();
   for (const slice of slices) {
     const ranges = selections.get(slice.key) ?? [];
@@ -342,6 +346,7 @@ function renderCard(
     if (typeof node.element_id === 'string') {
       const hash = createHash('sha256').update(key).digest('hex').slice(0, 12);
       clone.element_id = `e${createHash('sha256').update(`${page}:${hash}`).digest('hex').slice(0, 19)}`;
+      sourceById.set(clone.element_id, node.element_id);
     }
     return clone;
   };
@@ -360,7 +365,13 @@ function renderCard(
   const uniqueId = (id: string): string => {
     const ordinal = occurrences.get(id) ?? 0;
     occurrences.set(id, ordinal + 1);
-    return `e${createHash('sha256').update(`${page}:${id}:${ordinal}`).digest('hex').slice(0, 19)}`;
+    const normalized = `e${createHash('sha256').update(`${page}:${id}:${ordinal}`).digest('hex').slice(0, 19)}`;
+    if (elementIds) {
+      const source = sourceById.get(id) ?? id;
+      elementIds[source] ??= [];
+      elementIds[source].push(normalized);
+    }
+    return normalized;
   };
   const normalize = (value: any, path: string): any => {
     if (Array.isArray(value))
@@ -615,18 +626,23 @@ export function planFeishuCards(
   const prefixCount = chunks.length;
   chunks.push(...pack(remaining, prefixCount));
   if (!chunks.length) chunks.push([]);
-  const result = chunks.map((slices, index) => ({
-    budget: { ...(index < prefixCount ? (previous[index]?.budget ?? budget) : budget) },
-    slices,
-    sealed: index < prefixCount || index < chunks.length - 1,
-    content: renderCard(
-      card,
+  const result = chunks.map((slices, index) => {
+    const elementIds: Record<string, string[]> = {};
+    return {
+      elementIds,
+      budget: { ...(index < prefixCount ? (previous[index]?.budget ?? budget) : budget) },
       slices,
-      index,
-      ancestors(chunks.slice(0, index).flat()),
-      ancestors(chunks.slice(index + 1).flat()),
-    ),
-  }));
+      sealed: index < prefixCount || index < chunks.length - 1,
+      content: renderCard(
+        card,
+        slices,
+        index,
+        ancestors(chunks.slice(0, index).flat()),
+        ancestors(chunks.slice(index + 1).flat()),
+        elementIds,
+      ),
+    };
+  });
   for (const plan of result) assertFeishuCardBudget(plan.content, plan.budget);
   return result;
 }

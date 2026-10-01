@@ -57,17 +57,18 @@ export class QueryPresentationFactory {
       onMessageId,
     });
 
+    const nativeStreaming = adapter.usesNativeProgressStreaming?.() ?? false;
     renderer = new MessageRenderer({
       // FeishuSender owns the combined byte/table split and its message-id topology.
       // Supplying a predicate disables MessageRenderer's generic size-estimation fallback.
       shouldSplitState: () => false,
       channelOwnsPagination: adapter.channelType === 'feishu',
       platformLimit: FEISHU_MESSAGE_LIMIT,
-      throttleMs: 300,
+      throttleMs: nativeStreaming ? 250 : 300,
       adaptiveFlush: {
-        baseMs: 800,
-        minMs: 800,
-        maxMs: 4000,
+        baseMs: nativeStreaming ? 250 : 800,
+        minMs: nativeStreaming ? 250 : 800,
+        maxMs: nativeStreaming ? 1200 : 4000,
         sizePenaltyStartBytes: 10 * 1024,
         largeSizePenaltyStartBytes: 20 * 1024,
         fastOutputCharsPerSec: 240,
