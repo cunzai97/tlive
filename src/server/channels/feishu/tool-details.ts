@@ -136,6 +136,12 @@ function stringField(data: Record<string, unknown>, names: string[]): string | u
   return undefined;
 }
 
+function signedLines(text: string, prefix: '-' | '+'): string {
+  // Empty snippets contain no lines. Preserve blank lines and trailing newlines
+  // for non-empty snippets; the sign is display metadata, not file content.
+  return text.length === 0 ? '' : text.split('\n').map(line => `${prefix}${line}`).join('\n');
+}
+
 function editSections(input: unknown): string[] {
   const sections: string[] = [];
   const visit = (value: unknown, parentPath?: string): void => {
@@ -150,15 +156,19 @@ function editSections(input: unknown): string[] {
     const newText = stringField(data, ['new_string', 'newText', 'new_text', 'newString']);
     const content = stringField(data, ['content', 'file_content', 'fileContent', 'file content']);
     if (oldText !== undefined || newText !== undefined) {
+      const diff = [
+        oldText === undefined ? '（未提供旧片段）' : signedLines(oldText, '-'),
+        newText === undefined ? '（未提供新片段）' : signedLines(newText, '+'),
+      ].filter(Boolean).join('\n');
       sections.push(
         `文件：${path ?? '未提供文件路径'}\n本次改动（替换片段）\n` +
           '未提供旧文件全文；以下仅为本次替换片段，不是完整文件差异。\n' +
-          `替换前：\n${oldText ?? '（未提供旧片段）'}\n替换后：\n${newText ?? '（未提供新片段）'}`,
+          (diff || '（替换片段为空）'),
       );
     } else if (content !== undefined) {
       sections.push(
-        `文件：${path ?? '未提供文件路径'}\n本次新增／写入内容：\n${content}\n` +
-          '这是本次工具输入内容；不据此断言文件此前不存在，也不展示完整文件差异。',
+        `文件：${path ?? '未提供文件路径'}\n本次新增／写入内容：\n${signedLines(content, '+')}\n` +
+          '这是本次提交的内容；不据此断言文件此前不存在，也不展示完整文件差异。',
       );
     }
     for (const name of ['edits', 'changes', 'files', 'replacements']) {
@@ -307,16 +317,15 @@ export class FeishuToolDetails {
       const sections = editSections(cloned.input);
       if (sections.length === 0) return undefined;
       const labels: Record<Outcome, string> = {
-        success: '工具执行成功 · 本次输入／结果快照',
-        failed: '工具执行失败 · 输入／错误结果快照（不代表改动成功）',
-        interrupted: '工具执行中断 · 输入／结果快照（不代表改动完成）',
+        success: '工具执行成功 · 本次改动',
+        failed: '工具执行失败 · 拟改动内容（不代表改动成功）',
+        interrupted: '工具执行中断 · 拟改动内容（不代表改动完成）',
         returned: '工具结果已返回 · 执行状态未提供（不据此断言成功）',
       };
       const resultText =
         typeof cloned.result === 'string' ? cloned.result : JSON.stringify(cloned.result, null, 2);
       const text = redactSensitiveContent(
         `${labels[state]}\n工具：${cloned.toolName}\n\n${sections.join('\n\n')}\n\n` +
-          `工具输入快照（仅供核对）：\n${JSON.stringify(cloned.input, null, 2)}\n\n` +
           `工具结果快照：\n${resultText}`,
       );
       const id = randomUUID();

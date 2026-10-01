@@ -28,10 +28,18 @@
 
 https://open.feishu.cn/document/server-docs/im-v1/message-card/patch?lang=zh-CN
 
+## 编辑详情追加调整
+
+- 用户在切换确认时追加了详情展示要求，未选择立即切换；因此先补实现与验证，运行版本继续保持不变。
+- 去掉“工具输入快照（仅供核对）”及其原始 JSON 展示，内部仍保留调用内容用于稳定身份、授权和不可变快照。
+- 旧片段逐行加 `-`，新片段与写入内容逐行加 `+`；空片段不虚构新增/删除行，缺失片段只提示未知。
+- 原文件全文未提供时继续明确标为替换片段，不假装完整文件差异；失败/中断卡保留不代表成功/完成的提醒和完整工具结果。
+- 已覆盖 `replace`、`Edit`、`MultiEdit`、写入内容、多行/空行/CRLF/尾换行、长片段分页全文恢复，以及禁止点击时读文件或重跑工具。
+
 ## 已执行验证
 
-- `npm run check`：typecheck、lint、82 文件 / 807 项全部通过。
-- `npm run test:coverage`：82 文件 / 807 项全部通过。
+- `npm run check`：typecheck、lint、82 文件 / 814 项全部通过。
+- `npm run test:coverage`：82 文件 / 814 项全部通过。
 - `npm run build`、`node --check dist/main.mjs`、`git diff --check` 通过。
 - 真实 Factory → Renderer → Presenter → Adapter → Sender 接 mocked SDK：首段思考即时可见；长正文/快速输出仍在 200、400ms 写入；没有 CardKit 打字调用或动画配置。
 - 慢首发模拟 150ms 后，后续最新状态在 200ms 写入，而不是再等 200ms。

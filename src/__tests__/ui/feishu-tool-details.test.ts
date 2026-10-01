@@ -188,9 +188,9 @@ describe('FeishuToolDetails snapshot and scoped SDK integration', () => {
 
   it.each([
     ['write', { file_path: '/not/on/disk', content: 'original' }, '本次新增／写入内容'],
-    ['replace', { path: '/not/on/disk', oldText: 'before', newText: 'after' }, '替换前：\nbefore\n替换后：\nafter'],
-    ['Edit', { file_path: '/not/on/disk', old_string: 'before', new_string: 'after' }, '替换前：\nbefore\n替换后：\nafter'],
-    ['MultiEdit', { file_path: '/not/on/disk', edits: [{ old_string: 'one', new_string: 'two' }, { old_string: 'three', new_string: 'four' }] }, '替换前：\nthree\n替换后：\nfour'],
+    ['replace', { path: '/not/on/disk', oldText: 'before', newText: 'after' }, '-before\n+after'],
+    ['Edit', { file_path: '/not/on/disk', old_string: 'before', new_string: 'after' }, '-before\n+after'],
+    ['MultiEdit', { file_path: '/not/on/disk', edits: [{ old_string: 'one', new_string: 'two' }, { old_string: 'three', new_string: 'four' }] }, '-three\n+four'],
   ])('freezes %s invocation input/result; never opens paths or executes tools', async (toolName, inputData, expected) => {
     const details = store(); const mock = sdk();
     const data = entry({ toolName, inputData, toolResult: { output: 'original-result' } });
@@ -200,11 +200,71 @@ describe('FeishuToolDetails snapshot and scoped SDK integration', () => {
     bind(details, id);
     const result = await allPages(details, id, mock);
     expect(result.text).toContain(expected);
+    expect(result.text).not.toContain('工具输入快照');
     expect(result.text).toContain('original-result');
     expect(result.text).not.toContain('latest-file-content');
     expect(result.text).not.toContain('changed-result');
     expect(result.text).not.toContain('--- /not/on/disk');
     expect(mock.create).not.toHaveBeenCalled();
+  });
+
+  it('shows line-prefixed changes without dumping the tool input snapshot', async () => {
+    const details = store(); const mock = sdk();
+    const id = details.register('chat', entry({ toolName: 'replace', inputData: {
+      path: '/x', oldText: '旧第一行\n旧第二行', newText: '新第一行\n新第二行',
+      privateMetadata: 'INPUT_METADATA_MUST_NOT_APPEAR',
+    } }))!;
+    bind(details, id);
+    const result = await allPages(details, id, mock);
+    expect(result.text).toContain('-旧第一行\n-旧第二行\n+新第一行\n+新第二行');
+    expect(result.text).not.toContain('工具输入快照');
+    expect(result.text).not.toContain('INPUT_METADATA_MUST_NOT_APPEAR');
+    expect(result.text).not.toContain('"oldText"');
+    expect(result.text).toContain('written');
+  });
+
+  it.each([
+    [{ oldText: '', newText: '新增' }, '+新增', '-（'],
+    [{ oldText: '删除', newText: '' }, '-删除', '+（'],
+    [{ newText: '已知新内容' }, '（未提供旧片段）\n+已知新内容', '-（未提供旧片段）'],
+    [{ oldText: '已知旧内容' }, '-已知旧内容\n（未提供新片段）', '+（未提供新片段）'],
+  ])('does not invent diff lines for empty or missing snippets %j', async (snippets, expected, absent) => {
+    const details = store(); const mock = sdk();
+    const id = details.register('chat', entry({ toolName: 'replace', inputData: { path: '/x', ...snippets } }))!;
+    bind(details, id);
+    const result = await allPages(details, id, mock);
+    expect(result.text).toContain(expected);
+    expect(result.text).not.toContain(absent);
+    expect(result.text).not.toContain('工具输入快照');
+  });
+
+  it('preserves blank lines, CRLF and trailing newlines when prefixing edit snippets', async () => {
+    const details = store(); const mock = sdk();
+    const id = details.register('chat', entry({ toolName: 'Edit', inputData: {
+      path: '/x', old_string: '旧😀\r\n\n旧二\n', new_string: '新🐾\n\n新二\n',
+    } }))!;
+    bind(details, id);
+    const result = await allPages(details, id, mock);
+    expect(result.text).toContain('-旧😀\r\n-\n-旧二\n-\n+新🐾\n+\n+新二\n+');
+  });
+
+  it('preserves both complete signed snippets across detail pagination', async () => {
+    const details = store({ pageBytes: 3000 }); const mock = sdk();
+    const oldText = '旧😀\n第二行\n'.repeat(400);
+    const newText = '新🐾\n第二行\n'.repeat(400);
+    const id = details.register('chat', entry({ toolName: 'replace', inputData: { path: '/x', oldText, newText } }))!;
+    bind(details, id);
+    const result = await allPages(details, id, mock);
+    expect(result.total).toBeGreaterThan(1);
+    const marker = '未提供旧文件全文；以下仅为本次替换片段，不是完整文件差异。\n';
+    const from = result.text.indexOf(marker) + marker.length;
+    const to = result.text.indexOf('\n\n工具结果快照：', from);
+    const lines = result.text.slice(from, to).split('\n');
+    expect(lines.filter(line => line.startsWith('-')).map(line => line.slice(1)).join('\n')).toBe(oldText);
+    expect(lines.filter(line => line.startsWith('+')).map(line => line.slice(1)).join('\n')).toBe(newText);
+    expect(result.text).not.toContain('工具输入快照');
+    expect(mock.reply).toHaveBeenCalledTimes(1);
+    expect(mock.patch).toHaveBeenCalledTimes(result.total - 1);
   });
 
   it('does not fabricate unknown content or completed-but-missing results', () => {
@@ -266,10 +326,10 @@ describe('FeishuToolDetails snapshot and scoped SDK integration', () => {
     bind(details, id);
     const result = await allPages(details, id, mock);
     expect(result.total).toBeGreaterThan(2);
-    const expected = '工具执行成功 · 本次输入／结果快照\n工具：write\n\n' +
-      `文件：/nonexistent/snapshot.txt\n本次新增／写入内容：\n${content}\n` +
-      '这是本次工具输入内容；不据此断言文件此前不存在，也不展示完整文件差异。\n\n' +
-      `工具输入快照（仅供核对）：\n${JSON.stringify({ content, file_path: '/nonexistent/snapshot.txt' }, null, 2)}\n\n` +
+    const added = content.split('\n').map(line => `+${line}`).join('\n');
+    const expected = '工具执行成功 · 本次改动\n工具：write\n\n' +
+      `文件：/nonexistent/snapshot.txt\n本次新增／写入内容：\n${added}\n` +
+      '这是本次提交的内容；不据此断言文件此前不存在，也不展示完整文件差异。\n\n' +
       '工具结果快照：\nwritten';
     expect(result.text).toBe(expected);
     expect(mock.reply).toHaveBeenCalledTimes(1);
@@ -383,7 +443,7 @@ describe('FeishuToolDetails snapshot and scoped SDK integration', () => {
       const id = details.register('chat', data)!;
       (data.inputData as { new_string: string }).new_string = 'later mutation';
       bind(details, id); await open(details, id, mock.client);
-      expect(body(mock.reply.mock.calls[0][0])).toContain('替换后：\nnew');
+      expect(body(mock.reply.mock.calls[0][0])).toContain('-old\n+new');
       for (const spy of [...reads, ...executes]) expect(spy).not.toHaveBeenCalled();
     } finally {
       for (const spy of [...reads, ...executes]) spy.mockRestore();
