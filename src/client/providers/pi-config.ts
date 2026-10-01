@@ -8,6 +8,8 @@ export interface PiRuntimeOptions {
   thinkingLevel?: PiThinkingLevel;
   noSession?: boolean;
   offline?: boolean;
+  /** Explicit opt-in staged subagent extension; leaves shared Pi files untouched. */
+  subagentExtensionFile?: string;
   /**
    * Share of the model context window to keep free so Pi compacts earlier than its
    * own `contextWindow - reserveTokens` line. 0 leaves Pi's settings.json in charge.
@@ -31,6 +33,7 @@ export function loadPiProviderConfig(options: LoadPiProviderConfigOptions = {}):
   return {
     ...optional('agentDir', get('TL_PI_AGENT_DIR')),
     ...optional('sessionDir', get('TL_PI_SESSION_DIR')),
+    ...optional('subagentExtensionFile', get('TL_PI_SUBAGENT_EXTENSION_FILE')),
     ...optional('provider', get('TL_PI_PROVIDER')),
     ...optional('model', get('TL_PI_MODEL', options.defaultModel ?? '')),
     ...optional('thinkingLevel', normalizePiThinkingLevel(get('TL_PI_THINKING'))),

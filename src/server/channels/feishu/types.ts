@@ -30,6 +30,8 @@ export interface FeishuRenderedMessage {
   flowDetailUserId?: string;
   /** One physical message per detail navigation page; never silently emit overflow siblings. */
   feishuSingleCard?: boolean;
+  /** Semantic chunks for authorized child-only lossy compaction; never sent in card JSON. */
+  feishuSubagentCard?: { chunks: import('./subagent-budget.js').SubagentCardChunk[] };
   /** Non-animated latest-state progress, with per-message cadence protection. */
   feishuSnapshot?: boolean;
   /** Native CardKit transport for progress; not part of the platform card JSON. */

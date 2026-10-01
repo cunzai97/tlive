@@ -203,6 +203,7 @@ interface ProcessMessageParams {
     usage?: { toolUses: number; durationMs: number };
   }) => void;
   onAgentComplete?: (data: { summary: string; status: string }) => void;
+  onSubagentSnapshot?: (data: Extract<CanonicalEvent, { kind: 'subagent_snapshot' }>) => void;
   onPromptSuggestion?: (suggestion: string) => void;
   onToolProgress?: (data: { toolName: string; elapsed: number }) => void;
   onRateLimit?: (data: { status: string; utilization?: number; resetsAt?: number }) => void;
@@ -333,6 +334,9 @@ export class ConversationEngine {
             }
             break;
           }
+          case 'subagent_snapshot':
+            params.onSubagentSnapshot?.(value);
+            break;
           case 'agent_start':
             params.onAgentStart?.(value);
             break;

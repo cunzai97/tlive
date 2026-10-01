@@ -144,6 +144,9 @@ export class MessageRenderer {
   private permissionTracker?: PermissionTracker;
   private progressWatcher?: ProgressWatcher;
 
+  /** Local nonce for independently scoped child progress streams. */
+  get presentationTurnId(): string { return this.turnId; }
+
   get messageId(): string | undefined {
     return this._messageId;
   }

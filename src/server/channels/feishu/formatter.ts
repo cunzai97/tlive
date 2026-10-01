@@ -16,6 +16,7 @@ import type {
 import { t, type Locale } from '../../../shared/i18n/index.js';
 import type { FeishuCardElement } from './card-builder.js';
 import type { FeishuRenderedMessage } from './types.js';
+import type { SubagentCardChunk } from './subagent-budget.js';
 import type {
   HomeData,
   PermissionStatusData,
@@ -417,6 +418,8 @@ export class FeishuFormatter implements MessageFormatter<FeishuRenderedMessage> 
       };
     }
     const headerConfig = progressHeaderConfig(this.locale, data);
+    if (data.subagent) headerConfig.title = `${headerConfig.title} · 子代理 ${truncate(data.subagent.agentName, 60)}`;
+    const subagentChunks: SubagentCardChunk[] | undefined = data.subagent ? [] : undefined;
     const elements: FeishuCardElement[] = [];
 
     // Timeline elements
@@ -427,6 +430,7 @@ export class FeishuFormatter implements MessageFormatter<FeishuRenderedMessage> 
         md: this.md.bind(this),
         locale: this.locale,
         flowOptions: this.options.flowOptions,
+        subagentChunks,
         registerThinkingDetails: this.options.toolDetails ? block => {
           // The renderer supplies a fresh, local turn UUID; legacy IDs alone can collide.
           if (!data.turnId || !block.id) return undefined;
@@ -462,7 +466,11 @@ export class FeishuFormatter implements MessageFormatter<FeishuRenderedMessage> 
       elements,
       nested ? undefined : buttons,
     );
-    if (this.options.nativeStreaming === true && this.options.flowOptions?.mode !== 'legacy') {
+    if (subagentChunks) {
+      message.feishuSingleCard = true;
+      message.feishuSubagentCard = { chunks: subagentChunks };
+    }
+    if (!data.subagent && this.options.nativeStreaming === true && this.options.flowOptions?.mode !== 'legacy') {
       message.feishuStreaming = {
         enabled:
           data.phase !== 'completed' &&

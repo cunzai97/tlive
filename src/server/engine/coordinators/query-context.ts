@@ -2,6 +2,7 @@ import type { BaseChannelAdapter } from '../../channels/base.js';
 import type { InboundMessage } from '../../channels/types.js';
 import type { ChannelBinding } from '../../store/interface.js';
 import type { MessageRenderer } from '../messages/renderer.js';
+import type { SubagentFlowPresenter } from '../../presentation/subagent-presenter.js';
 import type { CostTracker } from '../cost-tracker.js';
 import type { DeferredToolHandler } from '../../../shared/providers/base.js';
 import type { LogContext } from '../../../shared/logger.js';
@@ -36,6 +37,7 @@ export class QueryContext {
     ) => Promise<Record<string, string>>,
     readonly sdkDeferredToolHandler: DeferredToolHandler,
     readonly ctx: LogContext,
+    readonly subagents?: SubagentFlowPresenter,
   ) {}
 
   /** Get workdir from binding or default */

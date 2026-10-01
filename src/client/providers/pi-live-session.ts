@@ -24,6 +24,7 @@ import type {
 import type { EffortLevel } from '../../shared/providers/effort.js';
 import { CommandBlockedError, NoActiveTurnError } from '../../shared/providers/errors.js';
 import { PiAdapter } from './pi-adapter.js';
+import { createSubagentResourceLoader } from './pi-subagent-extension.js';
 import { createPiAskBridge } from './pi-ask-bridge.js';
 import type { PiRuntimeOptions, PiThinkingLevel } from './pi-config.js';
 
@@ -396,6 +397,12 @@ export class PiLiveSession implements LiveSession {
       sessionManager,
       ...(model ? { model } : {}),
       ...(thinkingLevel ? { thinkingLevel } : {}),
+      ...(this.options.subagentExtensionFile ? {
+        resourceLoader: await createSubagentResourceLoader({
+          file: this.options.subagentExtensionFile, cwd: this.options.workingDirectory,
+          agentDir: this.agentDirPath(), settingsManager,
+        }),
+      } : {}),
     };
 
     const result = await createAgentSession(createOptions);

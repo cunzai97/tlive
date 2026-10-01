@@ -25,6 +25,30 @@ const toolResultSchema = z.object({
   isFinal: z.boolean().optional(),
 });
 
+const subagentTimelineEntrySchema = z.object({
+  kind: z.enum(['thinking', 'text', 'tool']),
+  blockId: z.string(),
+  text: z.string().optional(),
+  toolId: z.string().optional(),
+  toolName: z.string().optional(),
+  toolInput: z.string().optional(),
+  inputData: z.record(z.string(), z.unknown()).optional(),
+  toolResult: z.string().optional(),
+  status: z.enum(['running', 'completed', 'failed', 'interrupted']).optional(),
+});
+
+export const subagentSnapshotSchema = z.object({
+  kind: z.literal('subagent_snapshot'),
+  parentToolUseId: z.string().min(1),
+  childId: z.string().min(1),
+  agentName: z.string(),
+  task: z.string(),
+  status: z.enum(['queued', 'running', 'completed', 'failed', 'interrupted']),
+  timeline: z.array(subagentTimelineEntrySchema),
+  error: z.string().optional(),
+});
+export type SubagentSnapshot = z.infer<typeof subagentSnapshotSchema>;
+
 const toolProgressSchema = z.object({
   kind: z.literal('tool_progress'),
   toolName: z.string(),
@@ -171,6 +195,7 @@ export const canonicalEventSchema = z.discriminatedUnion('kind', [
   toolStartSchema,
   toolResultSchema,
   toolProgressSchema,
+  subagentSnapshotSchema,
   agentStartSchema,
   agentProgressSchema,
   agentCompleteSchema,

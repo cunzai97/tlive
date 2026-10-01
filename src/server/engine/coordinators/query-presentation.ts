@@ -6,6 +6,7 @@ import { withInboundReplyContext } from '../../channels/reply-context.js';
 import { t } from '../../../shared/i18n/index.js';
 import { MessageRenderer } from '../messages/renderer.js';
 import { QueryExecutionPresenter } from '../../presentation/query-presenter.js';
+import { SubagentFlowPresenter } from '../../presentation/subagent-presenter.js';
 
 export interface QueryTypingHandle {
   stop(): void;
@@ -29,6 +30,7 @@ interface QueryTurnPresentationOptions {
 export interface QueryTurnPresentation {
   renderer: MessageRenderer;
   presenter: QueryExecutionPresenter;
+  subagents?: SubagentFlowPresenter;
 }
 
 /** Owns per-turn IM presentation wiring: typing, renderer, presenter, reactions. */
@@ -125,7 +127,12 @@ export class QueryPresentationFactory {
         presenter.flush(content, isEdit, buttons, state),
     });
 
-    return { renderer, presenter };
+    const subagents = adapter.channelType === 'feishu' ? new SubagentFlowPresenter({
+      adapter, inbound: msg, parentTurnId: renderer.presentationTurnId,
+      cwd: binding.cwd || this.options.defaultWorkdir,
+      onError: () => console.warn('[subagent-flow] Child card update failed; original child/model execution is unchanged'),
+    }) : undefined;
+    return { renderer, presenter, subagents };
   }
 }
 

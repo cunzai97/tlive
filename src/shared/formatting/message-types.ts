@@ -351,6 +351,8 @@ export interface ErrorData {
 
 /** Progress update (for streaming) */
 export interface ProgressData {
+  /** A child progress stream is exactly one mutable physical card, never lossless overflow. */
+  subagent?: { agentName: string; task: string; parentToolUseId: string; childId: string };
   turnId?: string;
   phase: 'starting' | 'executing' | 'waiting_permission' | 'completed' | 'failed';
   taskSummary: string;

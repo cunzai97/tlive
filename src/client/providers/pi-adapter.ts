@@ -1,5 +1,6 @@
 import type { AgentSessionEvent } from '@earendil-works/pi-coding-agent';
 import { type CanonicalEvent, canonicalEventSchema } from '../../shared/canonical/schema.js';
+import { PiSubagentMapper } from './pi-subagents.js';
 
 interface PiAdapterState {
   sessionId?: string;
@@ -11,6 +12,7 @@ interface PiAdapterState {
 }
 
 export class PiAdapter {
+  private readonly subagents = new PiSubagentMapper();
   private state: PiAdapterState = {
     startedTools: new Set(),
     terminalEmitted: false,
@@ -43,6 +45,9 @@ export class PiAdapter {
           input: normalizeToolInput(event.args),
         });
         this.state.startedTools.add(event.toolCallId);
+        if (event.toolName === 'subagent') {
+          events.push(...this.subagents.start(event.toolCallId, event.args));
+        }
         break;
       case 'tool_execution_update':
         if (!this.state.startedTools.has(event.toolCallId)) {
@@ -53,6 +58,9 @@ export class PiAdapter {
             input: normalizeToolInput(event.args),
           });
           this.state.startedTools.add(event.toolCallId);
+        }
+        if (event.toolName === 'subagent') {
+          events.push(...this.subagents.update(event.toolCallId, event.args, event.partialResult));
         }
         events.push({
           kind: 'tool_result',
@@ -71,6 +79,11 @@ export class PiAdapter {
             input: normalizeToolInput({}),
           });
           this.state.startedTools.add(event.toolCallId);
+        }
+        if (event.toolName === 'subagent') {
+          events.push(
+            ...this.subagents.update(event.toolCallId, undefined, event.result, true, event.isError),
+          );
         }
         events.push({
           kind: 'tool_result',
@@ -121,6 +134,7 @@ export class PiAdapter {
     const pendingMessages = this.state.pendingMessages ?? [];
     const finalMessages = pendingMessages.length > 0 ? pendingMessages : messages;
     return [
+      ...this.subagents.finish('interrupted').map((event) => canonicalEventSchema.parse(event)),
       canonicalEventSchema.parse(this.queryResult(finalMessages, false, undefined, contextTokens)),
     ];
   }
@@ -129,6 +143,9 @@ export class PiAdapter {
     if (this.state.terminalEmitted) return [];
     this.state.terminalEmitted = true;
     return [
+      ...this.subagents
+        .finish(interrupted ? 'interrupted' : 'failed', interrupted ? 'Interrupted' : errorMessage(error))
+        .map((event) => canonicalEventSchema.parse(event)),
       canonicalEventSchema.parse(
         this.queryResult([], true, interrupted ? 'Interrupted' : errorMessage(error)),
       ),

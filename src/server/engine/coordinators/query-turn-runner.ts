@@ -50,6 +50,7 @@ export class QueryTurnRunner {
       binding,
       sessionKey,
       renderer,
+      subagents,
       costTracker,
       sdkPermissionHandler,
       sdkAskQuestionHandler,
@@ -102,6 +103,7 @@ export class QueryTurnRunner {
     let streamResult: StreamChatResult | undefined;
     let terminalEventSeen = false;
     let queryFailed = false;
+    const childFlowToolIds = new Set<string>();
 
     let liveSession: ReturnType<SDKEngine['getOrCreateSession']> | undefined;
     try {
@@ -180,9 +182,21 @@ export class QueryTurnRunner {
         onThinkingDelta: (delta) => renderer.onThinkingDelta(delta),
         onToolStart: (event) => renderer.onToolStart(event.name, event.input, event.id),
         onToolResult: (event) => {
-          renderer.onToolResult(event.toolUseId, event.content, event.isError);
+          // Display routing only: processMessage still consumes the full canonical result.
+          const visible = childFlowToolIds.has(event.toolUseId)
+            ? event.isFinal === false ? '子代理执行中；详细过程见各自进度卡。'
+              : event.isError ? '子代理未全部完成；请查看各自进度卡。'
+                : '子代理执行完成；详细过程见各自进度卡。'
+            : event.content;
+          renderer.onToolResult(event.toolUseId, visible, event.isError);
           if (event.isFinal !== false) {
             renderer.onToolComplete(event.toolUseId);
+          }
+        },
+        onSubagentSnapshot: (data) => {
+          if (subagents) {
+            childFlowToolIds.add(data.parentToolUseId);
+            subagents.update(data);
           }
         },
         onAgentStart: (data) => {
@@ -259,6 +273,10 @@ export class QueryTurnRunner {
             );
           }
           await deliverMedia();
+          try { await subagents?.finish(); }
+          catch {
+            renderer.onTextDelta('\n⚠️ 子代理进度卡未能完整更新；展示错误不会改变子代理实际执行。\n');
+          }
           await renderer.onComplete();
         },
         onPromptSuggestion: (suggestion) => {
@@ -285,6 +303,11 @@ export class QueryTurnRunner {
         onWarning: (warning) => renderer.onTextDelta(`\n⚠️ ${warning}\n`),
       });
     } finally {
+      try { await subagents?.finish(queryFailed || !terminalEventSeen); }
+      catch {
+        console.warn('[subagent-flow] Final child presentation failed; full model results were not changed');
+      }
+      await subagents?.dispose();
       if (registeredControls) {
         this.options.sdkEngine.setControlsForChat(chatKey, undefined, sessionKey, registeredControls);
       }

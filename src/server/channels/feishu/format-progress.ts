@@ -4,6 +4,7 @@ import { t } from '../../../shared/i18n/index.js';
 import type { ProgressData } from '../../../shared/formatting/message-types.js';
 import { truncate } from '../../../shared/core/string.js';
 import type { FeishuCardElement } from './card-builder.js';
+import type { SubagentCardChunk } from './subagent-budget.js';
 import { buttonElements, collapsiblePanel, markdownElement } from './card-elements.js';
 import { redactSensitiveContent } from '../../../shared/utils/content-filter.js';
 import { FEISHU_THINKING_PREVIEW_TOKENS, thinkingTail, type ThinkingPreview } from './thinking-preview.js';
@@ -36,6 +37,7 @@ export interface FormatProgressParams {
   flowOptions?: FlowOptions;
   /** Register the full semantic block before removing history from the serialized card. */
   registerThinkingDetails?: (block: FlowTextBlock) => string | undefined;
+  subagentChunks?: SubagentCardChunk[];
 }
 
 /** The exact semantic text IDs used by the block renderer, including nested thoughts. */
@@ -94,7 +96,10 @@ function textElements(
   if (!view || view.text) {
     children.push({ ...params.md(view?.text ?? block.text), element_id: flowElementId('text', identity) });
   }
-  if (block.kind === 'text') return children;
+  if (block.kind === 'text') {
+    params.subagentChunks?.push({ kind: 'text', elementIds: children.map(node => node.element_id as string) });
+    return children;
+  }
   if (!view && params.registerThinkingDetails) {
     children.push(params.md(params.locale === 'zh'
       ? '完整思考详情暂不可用；为避免丢失内容，此处保留全文。'
@@ -111,6 +116,7 @@ function textElements(
       callbackData: `flow_detail:open:${view.detailId}`,
     }]));
   }
+  params.subagentChunks?.push({ kind: 'thinking', elementIds: [flowElementId('thinking', identity)] });
   return [{
     ...collapsiblePanel(
       `${flowStatusLabel(block.status, params.locale)} · ${t('progress.labelThinkingProcess', params.locale)}`,
@@ -148,6 +154,7 @@ export function buildProgressTimelineElements(params: FormatProgressParams): Fei
       if (child.kind === 'tool') {
         const display = registry.display(child, params.locale);
         children.push(...display.elements);
+        params.subagentChunks?.push({ kind: 'tool', elementIds: display.elements.map(node => node.element_id as string), toolName: child.toolName, status: child.status });
         if (display.failureSummary) failures.push({ id: child.id, text: display.failureSummary });
       } else {
         children.push(...textElements(child, params, views));
@@ -170,11 +177,11 @@ export function buildProgressTimelineElements(params: FormatProgressParams): Fei
       element_id: flowElementId('group', block.id),
     });
     // These are siblings, not descendants of the group. Folding never hides failures.
-    for (const failure of failures)
-      elements.push({
-        ...params.md(failure.text),
-        element_id: flowElementId('failure', failure.id),
-      });
+    for (const failure of failures) {
+      const id = flowElementId('failure', failure.id);
+      elements.push({ ...params.md(failure.text), element_id: id });
+      params.subagentChunks?.push({ kind: 'text', elementIds: [id] });
+    }
   }
   return elements;
 }

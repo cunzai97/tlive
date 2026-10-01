@@ -25,6 +25,7 @@ import type { FeishuCardElement } from './card-builder.js';
 import { buildFeishuButtonElements, buildFeishuCard } from './card-builder.js';
 import { downgradeHeadings, markdownToFeishu } from './markdown.js';
 import type { FeishuRenderedMessage } from './types.js';
+import { compactSubagentCard } from './subagent-budget.js';
 
 interface FeishuCreateMessageResult {
   code?: number;
@@ -43,6 +44,8 @@ interface DeliveredPage {
   lastSnapshotPatchAt?: number;
   // Only confirmed SDK successes may become the planner's sealed prefix.
   plan?: PlannedFeishuCard;
+  /** Freeze an uncertain child-card create request until its UUID is acknowledged. */
+  pendingSubagentPlan?: PlannedFeishuCard;
 }
 
 interface DeliveryState {
@@ -246,7 +249,7 @@ async function deliverCards(
   const prepared = useNative
     ? prepareNativeCard(cardForMessage(message), message.feishuStreaming?.elementIds ?? [])
     : undefined;
-  const card = prepared?.card ?? cardForMessage(message);
+  const originalCard = prepared?.card ?? cardForMessage(message);
   const streamIds = prepared?.streamElementIds ?? [];
   let reductions = 0;
   let replanFrom = Number.POSITIVE_INFINITY;
@@ -256,7 +259,12 @@ async function deliverCards(
       const previous = state.pages.flatMap((page, index) =>
         page.plan ? [{ ...page.plan, sealed: page.plan.sealed && index < replanFrom }] : [],
       );
-      const plans = planFeishuCards(card, state.budget, previous);
+      const card = message.feishuSubagentCard
+        ? compactSubagentCard(originalCard, message.feishuSubagentCard.chunks, state.budget)
+        : originalCard;
+      const plans: PlannedFeishuCard[] = message.feishuSubagentCard
+        ? [{ content: JSON.stringify(card), slices: [], sealed: false, budget: state.budget }]
+        : planFeishuCards(card, state.budget, previous);
       // Empty sealed slots preserve indices in the middle, but a removed tail
       // must be withdrawn rather than kept as indefinitely blank overflow cards.
       while (plans.length > 1 && plans[plans.length - 1].slices.length === 0) plans.pop();
@@ -328,19 +336,25 @@ async function deliverCards(
             );
           }
         } else {
+          // With a lost response, reusing a UUID with changed content can acknowledge
+          // the old card while falsely committing the new text. Replay the exact create.
+          const initial = message.feishuSubagentCard ? page.pendingSubagentPlan ?? plan : plan;
+          if (message.feishuSubagentCard) page.pendingSubagentPlan = initial;
           const result = await sendMessageContent(
-            client,
-            message,
-            'interactive',
-            plan.content,
-            page.uuid,
-            plan.budget ?? state.budget,
-            allowReplyFallback,
+            client, message, 'interactive', initial.content, page.uuid,
+            initial.budget ?? state.budget, allowReplyFallback,
           );
           const id = result?.data?.message_id;
           if (!id) throw new Error('Feishu card send returned no message_id');
           page.messageId = String(id);
           page.threadId = result.data?.thread_id;
+          page.plan = initial;
+          page.pendingSubagentPlan = undefined;
+          rememberDelivery(client, state);
+          if (initial.content !== plan.content) {
+            await patchCard(client, page.messageId, plan.content, plan.budget ?? state.budget,
+              message.feishuSnapshot ? page : undefined);
+          }
         }
         page.plan = plan;
         rememberDelivery(client, state);
@@ -376,6 +390,10 @@ async function deliverCards(
         err instanceof Error && err.message.startsWith('Feishu card cannot fit budget:');
       if ((!isFeishuCardLimitError(err) && !localLimit) || reductions >= 2) throw err;
       replanFrom = Math.min(replanFrom, failedIndex);
+      if (message.feishuSubagentCard && state.pages[failedIndex]) {
+        // A definite capacity rejection was not committed; this request may shrink.
+        state.pages[failedIndex].pendingSubagentPlan = undefined;
+      }
       state.budget = lowerBudget(state.budget);
       reductions++;
     }

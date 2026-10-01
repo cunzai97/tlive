@@ -173,7 +173,7 @@ export class QueryOrchestrator {
       }
 
       const typing = this.presentation.startTyping(adapter, msg);
-      const { renderer, presenter } = this.presentation.createTurn({
+      const { renderer, presenter, subagents } = this.presentation.createTurn({
         adapter,
         msg,
         binding: currentBinding,
@@ -204,6 +204,7 @@ export class QueryOrchestrator {
           sdkInteractions.askQuestion,
           sdkInteractions.deferredTool,
           ctx,
+          subagents,
         );
         const outcome = await this.turnRunner.run(queryCtx);
 
@@ -259,6 +260,7 @@ export class QueryOrchestrator {
         }
         throw err;
       } finally {
+        await subagents?.dispose();
         typing.stop();
       }
     }
