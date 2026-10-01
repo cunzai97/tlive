@@ -8,7 +8,7 @@
 
 - 工作区：`/home/pan/work/tlive-card-snapshot-200ms`。
 - 分支：`feat/snapshot-refresh-200ms`；基线：`e2dc6e0`。
-- 本地实现和构建已完成；尚未部署，当前第一思考修复版与其 dist 保留且没有重启。
+- 实现、构建和验证已完成；用户确认后已独立启用本版。第一思考修复版与其 dist 保留作回退，原客户端没有重启。
 - `TL_FS_NATIVE_STREAMING=false` 成为配置层、adapter 和 formatter 的一致默认值。显式设为 true 仍可试用历史 CardKit 动画路径，但不作为当前目标。
 - 现有运行环境显式设置过 true，切换时必须显式改为 false；不能仅改源码默认值就宣称动画已关闭。
 
@@ -45,4 +45,13 @@ https://open.feishu.cn/document/server-docs/im-v1/message-card/patch?lang=zh-CN
 - 慢首发模拟 150ms 后，后续最新状态在 200ms 写入，而不是再等 200ms。
 - 600ms 的慢 patch 模拟中，请求起点为 200ms 与 801ms（零延迟续刷下一定时器 tick）；只保留最新累计内容，最大并发为一，没有按旧 delta 积压。
 - 直接连续状态/终态更新模拟在 0、200、400ms patch，同一消息没有重复发送；完整实体仍通过原预算检查。
-- 上述时间来自可重复的假时钟集成测试，不是手机实测。授权切换后需要用新任务确认真实观感。
+- 上述时间来自可重复的假时钟集成测试，不是手机实测。已授权切换后仍需要用新任务确认真实观感。
+
+## 已授权独立启用
+
+- 用户已明确确认两项一起切换。运行代码为 `ff9bec9`；旧 bridge PID `909569` 已正常退出，新 bridge PID `962178`。
+- 实际工作区和命令行产物为 `/home/pan/work/tlive-card-snapshot-200ms/dist/main.mjs`；fresh status 的 readyAt 为 `2026-10-01T03:32:25.995Z`。
+- 新日志确认飞书 `ws client ready`、Bridge started 及原 local 客户端重新注册；client PID `793041` 的命令行与工作目录保持不变。
+- 已从新进程环境读回 `TL_FS_NATIVE_STREAMING=false` 与 `TL_FS_CARD_FLOW=blocks`，桥接没有代理变量。启动前后系统 unit 文件哈希及默认 CLI 路径/内容不变。
+- 构建产物 SHA-256：`c7de53e07ae92312d2261eb43f2d26510ba3433a74bdb6e821a8849ff17c8dfb`。
+- 运行记录：`/home/pan/.tlive/runtime/card-snapshot-200ms-trial.json`；回退工作区：`/home/pan/work/tlive-card-first-thinking`。旧详情快照已因重启清空，需要新任务试用。
