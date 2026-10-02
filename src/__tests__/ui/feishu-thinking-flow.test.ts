@@ -23,6 +23,9 @@ function nodes(value: unknown): Array<Record<string, any>> {
   if (Array.isArray(value)) return value.flatMap(nodes);
   return [value as Record<string, any>, ...Object.values(value).flatMap(nodes)];
 }
+/** The 300-token budget is about the thought, not the fence that turns it into a code block. */
+const thoughtBody = (content: unknown): string =>
+  /^(`{3,})\n([\s\S]*)\n\1$/u.exec(String(content))?.[2] ?? String(content);
 function buttonAction(value: unknown, label: string): string | undefined {
   const button = nodes(value).find(node => node.tag === 'button' && node.text?.content === label);
   return button?.behaviors?.[0]?.value?.action ?? button?.value?.action;
@@ -98,7 +101,7 @@ describe('thinking preview, full detail and close through the adapter SDK bounda
     expect(main).not.toContain('ORIGINAL_START');
     expect(main).toContain('ORIGINAL_END');
     const preview = nodes(JSON.parse(main)).find(node => node.tag === 'markdown' && String(node.content).includes('ORIGINAL_END'))!;
-    expect(estimatedTokenCount(preview.content)).toBeLessThanOrEqual(300);
+    expect(estimatedTokenCount(thoughtBody(preview.content))).toBeLessThanOrEqual(300);
     const open = buttonAction(JSON.parse(main), '查看完整思考')!;
     expect(open).toBeTruthy();
     for (const args of [[open, messageId, 'other'], [open, messageId, 'owner', 'wrong'], [open, 'wrong']])

@@ -6,7 +6,7 @@ import { truncate } from '../../../shared/core/string.js';
 import { TODO_MARKERS } from '../../../shared/canonical/plan-signature.js';
 import type { FeishuCardElement } from './card-builder.js';
 import type { SubagentCardChunk } from './subagent-budget.js';
-import { buttonElements, collapsiblePanel, markdownElement } from './card-elements.js';
+import { buttonElements, codeBlockElement, collapsiblePanel, markdownElement } from './card-elements.js';
 import { redactSensitiveContent } from '../../../shared/utils/content-filter.js';
 import { FEISHU_THINKING_PREVIEW_TOKENS, thinkingTail, type ThinkingPreview } from './thinking-preview.js';
 import {
@@ -95,7 +95,11 @@ function textElements(
   const view = views.get(block);
   const children: FeishuCardElement[] = [];
   if (!view || view.text) {
-    children.push({ ...params.md(view?.text ?? block.text), element_id: flowElementId('text', identity) });
+    const body = view?.text ?? block.text;
+    // Reasoning is verbatim model output: fence it so Feishu renders a code block rather than
+    // reparsing markdown, headings and stray backticks inside the thought.
+    const element = block.kind === 'thinking' ? codeBlockElement(body) : params.md(body);
+    children.push({ ...element, element_id: flowElementId('text', identity) });
   }
   if (block.kind === 'text') {
     params.subagentChunks?.push({ kind: 'text', elementIds: children.map(node => node.element_id as string) });

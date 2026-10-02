@@ -6,6 +6,7 @@ import {
   type CardObject,
   type FeishuCardBudget,
 } from './card-budget.js';
+import { codeBlockBody } from './card-elements.js';
 
 const CHILD_ARRAYS = ['elements', 'columns', 'actions'] as const;
 const API_INTERVAL_MS = 120;
@@ -250,6 +251,21 @@ function envelope(card: CardObject): string {
   delete value.config.streaming_mode;
   return JSON.stringify(value);
 }
+/**
+ * Text grows by appending, so a plain prefix test keeps what the client already printed. A code
+ * block breaks that: its closing fence moves with every delta. Re-fence the held body instead of
+ * dropping it, or every structural transition would wipe the thought and reprint it.
+ */
+function acknowledgedPrefix(desired: unknown, acknowledged: unknown): string {
+  if (typeof acknowledged !== 'string') return '';
+  if (typeof desired !== 'string') return '';
+  if (desired.startsWith(acknowledged)) return acknowledged;
+  const wanted = codeBlockBody(desired);
+  const held = codeBlockBody(acknowledged);
+  return wanted && held && wanted.body.startsWith(held.body)
+    ? `${wanted.fence}\n${held.body}\n${wanted.fence}`
+    : '';
+}
 function attributes(node: CardObject): CardObject {
   const value = clone(node);
   for (const key of CHILD_ARRAYS) delete value[key];
@@ -306,9 +322,7 @@ export function applyNativeCard(
       for (const id of streamElementIds) {
         const node = refs(staged).get(id);
         const prefix = currentRefs.get(id)?.content;
-        if (node?.tag === 'markdown')
-          node.content =
-            typeof prefix === 'string' && node.content.startsWith(prefix) ? prefix : '';
+        if (node?.tag === 'markdown') node.content = acknowledgedPrefix(node.content, prefix);
       }
       await operation(
         client,

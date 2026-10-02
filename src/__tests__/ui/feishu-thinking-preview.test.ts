@@ -11,6 +11,8 @@ function nodes(value: unknown): Array<Record<string, any>> {
   if (Array.isArray(value)) return value.flatMap(nodes);
   return [value as Record<string, any>, ...Object.values(value).flatMap(nodes)];
 }
+/** Thinking is fenced so Feishu renders a code block; the preview budget still counts the body alone. */
+const unfenced = (content: string): string => /^(`{3,})\n([\s\S]*)\n\1$/u.exec(content)?.[2] ?? content;
 const progress = (timeline: ProgressData['timeline'], extra: Partial<ProgressData> = {}): ProgressData => ({
   turnId: 'turn', phase: 'executing', taskSummary: '任务', renderedText: '', totalTools: 0,
   elapsedSeconds: 1, todoItems: [], actionButtons: [], timeline, ...extra,
@@ -80,8 +82,10 @@ describe('thinking preview formatting without hidden full-history JSON', () => {
       { kind: 'thinking', blockId: 'latest', text: '最'.repeat(270) },
     ]));
     const all = nodes(message);
-    const thoughtText = ['old', 'middle', 'latest'].map(id => all.find(node => node.element_id === flowElementId('text', id))?.content ?? '');
+    const bodies = ['old', 'middle', 'latest'].map(id => all.find(node => node.element_id === flowElementId('text', id))?.content ?? '');
+    const thoughtText = bodies.map(unfenced);
     expect(thoughtText).toEqual(['', '中'.repeat(30), '最'.repeat(270)]);
+    expect(bodies.slice(1).every(content => content.startsWith('```') && content.endsWith('```'))).toBe(true);
     expect(estimatedTokenCount(thoughtText.join(''))).toBe(300);
     expect(JSON.stringify(message)).not.toContain('消失'.repeat(20));
     expect(JSON.stringify(message)).toContain('模型正文不裁剪'.repeat(700));
@@ -110,6 +114,21 @@ describe('thinking preview formatting without hidden full-history JSON', () => {
     const json = JSON.stringify(message);
     expect(json).toContain('[REDACTED]');
     expect(json).not.toContain('A'.repeat(50));
+  });
+  it('hands thought text to Feishu as a code block without reparsing its markdown', () => {
+    const { formatter } = fixture();
+    const thought = '# 标题\n用 `行内代码` 和 ```围栏``` 举例\n结尾反引号 ``';
+    const message = formatter.formatProgress('chat', progress([
+      { kind: 'thinking', blockId: 'thought', text: thought },
+      { kind: 'text', blockId: 'answer', text: '# 正文标题仍然降级' },
+    ]));
+    const all = nodes(message);
+    const content = all.find(node => node.element_id === flowElementId('text', 'thought'))!.content as string;
+    // The body carries a triple-backtick run, so a plain fence would close the block early.
+    expect(content).toBe(`\`\`\`\`\n${thought}\n\`\`\`\``);
+    expect(content).toContain('# 标题');
+    const answer = all.find(node => node.element_id === flowElementId('text', 'answer'))!.content as string;
+    expect(answer).toBe('**正文标题仍然降级**');
   });
   it('does not reuse an ID-less legacy turn as a mutable thinking detail source', () => {
     const { formatter, registerThinking } = fixture();

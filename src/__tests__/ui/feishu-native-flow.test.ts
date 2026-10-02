@@ -45,6 +45,10 @@ function nodes(value: unknown): Array<Record<string, any>> {
   const node = value as Record<string, any>;
   return [node, ...Object.values(node).flatMap(nodes)];
 }
+/** Thinking is fenced for Feishu's code block; assertions care about the body. */
+const thoughtBody = (content: unknown): string =>
+  /^(`{3,})\n([\s\S]*)\n\1$/u.exec(String(content))?.[2] ?? String(content);
+const fenced = (body: string): string => `\`\`\`\n${body}\n\`\`\``;
 function find(card: Record<string, any>, id: string) {
   const result = nodes(card).find((node) => node.element_id === id);
   if (!result) throw new Error(`Unknown SDK element ${id}`);
@@ -190,14 +194,14 @@ describe('native flow on the real Feishu presentation/sender path', () => {
       const panel = nodes(firstCard).find((node) => node.tag === 'collapsible_panel')!;
       expect(panel.expanded).toBe(true);
       expect(panel.header.title.content).toContain('进行中');
-      expect(nodes(panel).find((node) => node.tag === 'markdown')!.content).toBe('我先分析');
+      expect(thoughtBody(nodes(panel).find((node) => node.tag === 'markdown')!.content)).toBe('我先分析');
       expect(firstCard.config.streaming_mode).toBe(true);
       expect(JSON.stringify(firstCard)).not.toContain('Starting');
-      const firstElement = sdk.text.mock.calls.find(([request]) => request.data.content === '我先分析')![0].path;
+      const firstElement = sdk.text.mock.calls.find(([request]) => request.data.content === fenced('我先分析'))![0].path;
       turn.renderer.onThinkingDelta('，还在继续思考');
       await vi.advanceTimersByTimeAsync(500);
       expect(sdk.text.mock.calls.some(([request]) => request.path.card_id === firstElement.card_id &&
-        request.path.element_id === firstElement.element_id && request.data.content === '我先分析，还在继续思考')).toBe(true);
+        request.path.element_id === firstElement.element_id && request.data.content === fenced('我先分析，还在继续思考'))).toBe(true);
       expect(nodes(remoteMessage(firstMessage)).find((node) => node.tag === 'collapsible_panel')!.expanded).toBe(true);
       expect(sdk.cardCreate).toHaveBeenCalledTimes(1);
       expect(sdk.imPatch).not.toHaveBeenCalled();
@@ -206,6 +210,33 @@ describe('native flow on the real Feishu presentation/sender path', () => {
       expect(nodes(remoteMessage(firstMessage)).find((node) => node.tag === 'collapsible_panel')!.expanded).toBe(false);
       await settle(turn.renderer.onComplete());
       expect(remoteMessage(firstMessage).config.streaming_mode).toBe(false);
+      assertEntityBudgets();
+    } finally { turn.renderer.dispose(); }
+  });
+
+  it('keeps an already printed thought inside its code block across a structural change', async () => {
+    const factory = new QueryPresentationFactory({ defaultWorkdir: '/tmp' });
+    const turn = factory.createTurn({ adapter, msg: {
+      channelType: 'feishu', chatId: 'chat', threadId: 'thread', userId: 'owner', text: '测试',
+      messageId: 'request', replyInThread: true, replyTargetMessageId: 'request',
+    }, binding: {}, sessionKey: 'session', reactions: { permission: 'Pin', processing: 'Typing', stalled: 'OneSecond' },
+      typing: { stop() {} }, onMessageId() {} });
+    try {
+      turn.renderer.onThinkingDelta('我先分析');
+      await vi.advanceTimersByTimeAsync(600);
+      const printed = sdk.text.mock.calls.find(([request]) => thoughtBody(request.data.content) === '我先分析');
+      expect(printed).toBeTruthy();
+      const elementId = printed![0].path.element_id;
+      // Starting a tool changes the card topology, which is where a fenced tail used to be wiped.
+      turn.renderer.onToolStart('Read', { path: '/tmp/x' }, 'call-1');
+      await vi.advanceTimersByTimeAsync(600);
+      expect(sdk.text.mock.calls.filter(([request]) => request.path.element_id === elementId)
+        .map(([request]) => request.data.content)).not.toContain('');
+      const firstMessage = [...messages.keys()][0];
+      const held = nodes(remoteMessage(firstMessage)).filter(node => node.tag === 'markdown')
+        .map(node => node.content).filter(content => thoughtBody(content) === '我先分析');
+      expect(held).toEqual([fenced('我先分析')]);
+      await settle(turn.renderer.onComplete());
       assertEntityBudgets();
     } finally { turn.renderer.dispose(); }
   });

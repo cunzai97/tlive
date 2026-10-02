@@ -89,6 +89,10 @@ function nodes(value: unknown): Array<Record<string, unknown>> {
   return [value as Record<string, unknown>, ...Object.values(value).flatMap(nodes)];
 }
 
+/** The 300-token budget is about the thought, not the fence that turns it into a code block. */
+const thoughtBody = (content: unknown): string =>
+  /^(`{3,})\n([\s\S]*)\n\1$/u.exec(String(content))?.[2] ?? String(content);
+
 function detailAction(message: RenderedMessage): string {
   const action = nodes(message).map((node) => node.action)
     .find((value) => typeof value === 'string' && value.startsWith('flow_detail:open:'));
@@ -255,7 +259,7 @@ describe('SubagentFlowPresenter', () => {
     const message = f.messages.get('child-card-1')!;
     expect(JSON.stringify(message)).not.toContain('ORIGINAL_BEGIN');
     const preview = nodes(message).find((node) => node.tag === 'markdown' && String(node.content).includes('ORIGINAL_END'))!;
-    expect(estimatedTokenCount(String(preview.content))).toBeLessThanOrEqual(300);
+    expect(estimatedTokenCount(thoughtBody(preview.content))).toBeLessThanOrEqual(300);
     expect(f.data[0].timeline?.every((entry) => entry.blockId?.startsWith(f.data[0].turnId!))).toBe(true);
     expect(f.data[0].toolLogs?.every((entry) => entry.toolId?.startsWith(f.data[0].turnId!))).toBe(true);
     const register = vi.spyOn(f.details, 'registerThinking');

@@ -25,6 +25,10 @@ import {
   type ToolDisplayCall,
 } from '../../server/channels/feishu/tool-display.js';
 
+/** Thinking ships inside a fence so Feishu renders a code block; assertions care about the body. */
+const thoughtBody = (content: unknown): string =>
+  /^(`{3,})\n([\s\S]*)\n\1$/u.exec(String(content))?.[2] ?? String(content);
+
 function progress(overrides: Partial<ProgressData> = {}): ProgressData {
   return {
     phase: 'completed',
@@ -88,7 +92,7 @@ describe('flow blocks: semantic grouping and token accounting', () => {
     ]);
     const panel = elements(data).find((element) => element.tag === 'collapsible_panel')!;
     expect(panel.expanded).toBe(true);
-    expect(panel.elements?.[0].content).toBe('正在分析');
+    expect(thoughtBody(panel.elements?.[0].content)).toBe('正在分析');
     expect(JSON.stringify(elements(data))).not.toContain('Starting');
   });
 
@@ -214,9 +218,9 @@ describe('flow blocks: semantic grouping and token accounting', () => {
       { kind: 'thinking', text: 'think2' }, tool('Grep', 'r2'),
     ] }))[0].elements ?? [];
     expect(nested.map((item) => item.tag)).toEqual(['markdown', 'collapsible_panel', 'markdown', 'collapsible_panel', 'markdown']);
-    expect(nested[1].elements?.[0].content).toBe('think1');
+    expect(thoughtBody(nested[1].elements?.[0].content)).toBe('think1');
     expect(nested[2].content).toBe('text1');
-    expect(nested[3].elements?.[0].content).toBe('think2');
+    expect(thoughtBody(nested[3].elements?.[0].content)).toBe('think2');
   });
 
   it('does not merge mixed categories or leap over another category', () => {
@@ -234,7 +238,7 @@ describe('flow blocks: lossless model text and call identity', () => {
     const thought = `FIRST_THOUGHT_${'旧思考'.repeat(700)}LAST_THOUGHT`;
     const card = elements(progress({ phase, timeline: [{ kind: 'thinking', text: thought }] }));
     expect(card[0]).toMatchObject({ tag: 'collapsible_panel', expanded: phase === 'executing' });
-    expect(card[0].elements?.[0].content).toBe(thought);
+    expect(thoughtBody(card[0].elements?.[0].content)).toBe(thought);
     expect(JSON.stringify(card)).not.toContain('200 tokens');
     expect(card[0].body).toBeUndefined();
   });
