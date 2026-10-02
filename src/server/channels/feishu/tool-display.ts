@@ -3,6 +3,7 @@ import type { Locale } from '../../../shared/i18n/index.js';
 import { truncate } from '../../../shared/core/string.js';
 import type { FeishuCardElement } from './card-builder.js';
 import { buttonElements, collapsiblePanel, markdownElement } from './card-elements.js';
+import type { PlanTodo } from '../../../shared/canonical/plan-signature.js';
 
 export type ToolDisplayCategory = 'exploration' | 'execution' | 'editing' | 'generic';
 export type FlowStatus = 'running' | 'completed' | 'failed' | 'interrupted';
@@ -16,6 +17,8 @@ export interface ToolDisplayCall {
   toolResult?: string;
   status: FlowStatus;
   detailId?: string;
+  /** Set when the input is a task list; the board renders it, the timeline never repeats it. */
+  plan?: PlanTodo[];
 }
 
 export interface ToolDisplayResult {
@@ -156,6 +159,11 @@ function displayTool(
 ): ToolDisplayResult {
   const heading = `${flowStatusLabel(call.status, locale)} · **${call.toolName}**`;
   const elements: FeishuCardElement[] = [];
+  if (call.plan) {
+    // The list is already on the card's persistent board; dumping its JSON here is noise.
+    elements.push(markdownElement(heading));
+    return { elements, failureSummary: failureSummary(call, locale) };
+  }
   if (definition.category === 'editing') {
     const paths = filePaths(call);
     const entries = paths.length

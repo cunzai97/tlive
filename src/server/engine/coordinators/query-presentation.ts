@@ -5,6 +5,7 @@ import { FEISHU_SNAPSHOT_REFRESH_MS } from '../../../shared/feishu-card-config.j
 import { withInboundReplyContext } from '../../channels/reply-context.js';
 import { t } from '../../../shared/i18n/index.js';
 import { MessageRenderer } from '../messages/renderer.js';
+import { PlanBoard } from '../plan-board.js';
 import { QueryExecutionPresenter } from '../../presentation/query-presenter.js';
 import { SubagentFlowPresenter } from '../../presentation/subagent-presenter.js';
 
@@ -20,7 +21,7 @@ interface QueryPresentationFactoryOptions {
 interface QueryTurnPresentationOptions {
   adapter: BaseChannelAdapter;
   msg: InboundMessage;
-  binding: { cwd?: string; sdkSessionId?: string };
+  binding: { cwd?: string; sessionId?: string; sdkSessionId?: string };
   sessionKey: string;
   reactions: { permission: string; processing: string; stalled: string };
   typing: QueryTypingHandle;
@@ -36,6 +37,7 @@ export interface QueryTurnPresentation {
 /** Owns per-turn IM presentation wiring: typing, renderer, presenter, reactions. */
 export class QueryPresentationFactory {
   private readonly typingIntervalMs: number;
+  private readonly plans = new PlanBoard();
 
   constructor(private readonly options: QueryPresentationFactoryOptions) {
     this.typingIntervalMs = options.typingIntervalMs ?? 4000;
@@ -61,6 +63,12 @@ export class QueryPresentationFactory {
     });
 
     const fastSnapshots = adapter.channelType === 'feishu';
+    // Bind board ownership to trusted routing AND a session generation (/new rotates it).
+    const planSession = binding.sessionId ?? binding.sdkSessionId;
+    const planScope = planSession ? JSON.stringify([
+      adapter.channelType, msg.chatId, msg.userId, msg.threadId ?? '', msg.scopeId ?? '',
+      sessionKey, planSession,
+    ]) : undefined;
     renderer = new MessageRenderer({
       // FeishuSender owns the combined byte/table split and its message-id topology.
       // Supplying a predicate disables MessageRenderer's generic size-estimation fallback.
@@ -83,6 +91,11 @@ export class QueryPresentationFactory {
       },
       cwd: binding.cwd || this.options.defaultWorkdir,
       sessionId: binding.sdkSessionId,
+      // A renderer only lives for one turn; the board is what makes the plan survive to the next.
+      initialTodos: this.plans.current(planScope),
+      onTodosChanged: (items) => {
+        this.plans.update(planScope, items);
+      },
       onPermissionReaction: () => {
         if (renderer.messageId) {
           adapter.addReaction(msg.chatId, renderer.messageId, reactions.permission).catch(() => {});

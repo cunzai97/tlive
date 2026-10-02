@@ -116,7 +116,7 @@ describe('ClaudeAdapter', () => {
 
   describe('hidden tool filtering', () => {
     const hiddenTools = [
-      'ToolSearch', 'TodoRead', 'TodoWrite',
+      'ToolSearch', 'TodoRead',
       'TaskCreate', 'TaskUpdate', 'TaskList', 'TaskGet', 'TaskStop', 'TaskOutput',
     ];
 
@@ -132,6 +132,25 @@ describe('ClaudeAdapter', () => {
 
         expect(events).toHaveLength(0);
       }
+    });
+
+    it('passes TodoWrite through so its payload can reach the plan board', () => {
+      const events = adapter.mapMessage({
+        type: 'assistant',
+        message: {
+          content: [
+            {
+              type: 'tool_use',
+              id: 'tu_todo',
+              name: 'TodoWrite',
+              input: { todos: [{ content: '改 adapter', status: 'in_progress', activeForm: 'Editing' }] },
+            },
+          ],
+        },
+      });
+
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ kind: 'tool_start', name: 'TodoWrite' });
     });
 
     it('filters hidden tools from assistant messages', () => {

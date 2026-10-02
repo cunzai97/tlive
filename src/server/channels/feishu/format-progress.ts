@@ -3,6 +3,7 @@ import type { Locale } from '../../../shared/i18n/index.js';
 import { t } from '../../../shared/i18n/index.js';
 import type { ProgressData } from '../../../shared/formatting/message-types.js';
 import { truncate } from '../../../shared/core/string.js';
+import { TODO_MARKERS } from '../../../shared/canonical/plan-signature.js';
 import type { FeishuCardElement } from './card-builder.js';
 import type { SubagentCardChunk } from './subagent-budget.js';
 import { buttonElements, collapsiblePanel, markdownElement } from './card-elements.js';
@@ -257,15 +258,16 @@ export function buildProgressContentElements(params: FormatProgressParams): Feis
   }
   if (data.todoItems.length > 0) {
     const done = data.todoItems.filter((item) => item.status === 'completed').length;
-    const todoLines = data.todoItems.map((item) => {
-      const icon = item.status === 'completed' ? '✅' : item.status === 'in_progress' ? '🔧' : '⬜';
-      return `${icon} ${item.content}`;
-    });
-    elements.push(
-      md(
-        `**${t('progress.labelWorkProgress', locale)}** (${done}/${data.todoItems.length})\n${todoLines.join('\n')}`,
+    const todoLines = data.todoItems.map((item) => `${TODO_MARKERS[item.status]} ${item.content}`);
+    // One stable identity per conversation: the board is the same block on every card refresh.
+    elements.push({
+      ...collapsiblePanel(
+        `📋 ${t('progress.labelWorkProgress', locale)} (${done}/${data.todoItems.length})`,
+        [markdownElement(todoLines.join('\n'))],
+        { expanded: true },
       ),
-    );
+      element_id: flowElementId('plan', 'board'),
+    });
   }
   return elements;
 }

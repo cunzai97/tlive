@@ -7,6 +7,7 @@ import { t } from '../../../shared/i18n/index.js';
 import type { FeishuCardElement } from './card-builder.js';
 import type { ProgressData } from '../../../shared/formatting/message-types.js';
 import { truncate } from '../../../shared/core/string.js';
+import { TODO_MARKERS } from '../../../shared/canonical/plan-signature.js';
 import { downgradeHeadings, splitLargeTables } from './markdown.js';
 import { collapsiblePanel, dividerElement, markdownElement } from './card-elements.js';
 
@@ -444,10 +445,9 @@ export function buildProgressContentElements(params: FormatProgressParams): Feis
   // Todo progress
   if (data.todoItems.length > 0) {
     const done = data.todoItems.filter((item) => item.status === 'completed').length;
-    const todoLines = data.todoItems.slice(0, 5).map((item) => {
-      const icon = item.status === 'completed' ? '✅' : item.status === 'in_progress' ? '🔧' : '⬜';
-      return `${icon} ${item.content}`;
-    });
+    const todoLines = data.todoItems.slice(0, 5).map(
+      (item) => `${TODO_MARKERS[item.status]} ${item.content}`,
+    );
     elements.push(
       md(
         `**${t('progress.labelWorkProgress')}** (${done}/${data.todoItems.length})\n${todoLines.join('\n')}`,

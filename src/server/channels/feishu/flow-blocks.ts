@@ -1,4 +1,5 @@
 import type { ProgressData } from '../../../shared/formatting/message-types.js';
+import { parsePlanFromToolCall } from '../../../shared/canonical/plan-signature.js';
 import {
   createDefaultToolDisplayRegistry,
   type FlowStatus,
@@ -147,10 +148,16 @@ export function collectFlowItems(
           : 'running';
       const status = entry.status ?? inferredStatus;
       if (existing) {
+        const inputChanged = entry.inputData !== undefined || entry.toolInput !== undefined;
         if (entry.toolInput !== undefined) existing.toolInput = entry.toolInput;
         if (entry.inputData !== undefined) existing.inputData = entry.inputData;
         if (entry.toolResult !== undefined) existing.toolResult = entry.toolResult;
         if (entry.detailId !== undefined) existing.detailId = entry.detailId;
+        // A plan grows in place: the last complete payload wins, partial ones keep the old.
+        if (inputChanged) {
+          const plan = parsePlanFromToolCall(existing.inputData, existing.toolInput);
+          if (plan) existing.plan = plan;
+        }
         // Delayed/repeated start events cannot reopen a completed call.
         if (status !== 'running' || existing.status === 'running') existing.status = status;
         continue;
@@ -166,6 +173,7 @@ export function collectFlowItems(
         status,
         detailId: entry.detailId,
         category: registry.category(entry.toolName ?? ''),
+        plan: parsePlanFromToolCall(entry.inputData, entry.toolInput),
       };
       if (entry.toolId) toolById.set(entry.toolId, tool);
       items.push(tool);

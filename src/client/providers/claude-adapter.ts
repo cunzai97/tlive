@@ -15,10 +15,10 @@ export interface SDKMessage {
   [key: string]: unknown;
 }
 
+// TodoWrite stays visible: the server renders its payload as the session plan board.
 const HIDDEN_TOOLS = new Set([
   'ToolSearch',
   'TodoRead',
-  'TodoWrite',
   'TaskCreate',
   'TaskUpdate',
   'TaskList',

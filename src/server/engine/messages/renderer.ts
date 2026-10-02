@@ -6,7 +6,7 @@
 import { randomUUID } from 'node:crypto';
 import { redactSensitiveContent } from '../../../shared/utils/content-filter.js';
 import { truncate } from '../../../shared/core/string.js';
-import type { TodoStatus } from '../../../shared/canonical/schema.js';
+import { parsePlanLike, parsePlanFromToolResult, type PlanTodo } from '../../../shared/canonical/plan-signature.js';
 import type { VerboseLevel } from '../state/session-state.js';
 import type { Button } from '../../../shared/ui/types.js';
 import type { AgentRuntimeInfo } from '../../../shared/providers/base.js';
@@ -35,6 +35,9 @@ export interface MessageRendererOptions {
   cwd?: string;
   model?: string;
   sessionId?: string;
+  /** Plan carried over from earlier turns of the same session. */
+  initialTodos?: PlanTodo[];
+  onTodosChanged?: (items: PlanTodo[]) => void;
   verboseLevel?: VerboseLevel;
   flushCallback: (
     content: string,
@@ -50,9 +53,8 @@ export interface MessageRendererOptions {
   onFlushError?: (error: Error, context: { phase: string; contentPreview: string }) => void;
 }
 
-/** Tools silently ignored */
+/** Tools silently ignored. TodoWrite is deliberately absent: the plan row is worth one line. */
 const HIDDEN_TOOLS = new Set([
-  'TodoWrite',
   'TaskCreate',
   'TaskUpdate',
   'TaskList',
@@ -86,7 +88,11 @@ export class MessageRenderer {
   private footerLine?: string;
   private errorMessage?: string;
   private currentTool: CurrentTool | null = null;
-  private todoItems: Array<{ content: string; status: TodoStatus }> = [];
+  private todoItems: PlanTodo[] = [];
+  private readonly onTodosChanged?: (items: PlanTodo[]) => void;
+  private nextPlanRevision = 0;
+  private acceptedPlanRevision = 0;
+  private readonly toolPlanRevisions = new Map<string, number>();
   private thinkingText = '';
   private toolLogs: ToolLogEntry[] = [];
   private toolIdToLogIndex = new Map<string, number>();
@@ -166,6 +172,8 @@ export class MessageRenderer {
     this.cwd = options.cwd;
     this.model = options.model;
     this.sessionId = options.sessionId;
+    this.onTodosChanged = options.onTodosChanged;
+    this.todoItems = structuredClone(options.initialTodos ?? []);
     this.verboseLevel = options.verboseLevel ?? 1;
     if (options.adaptiveFlush) {
       const adaptiveOptions = options.adaptiveFlush === true ? {} : options.adaptiveFlush;
@@ -206,7 +214,15 @@ export class MessageRenderer {
   }
 
   onToolStart(name: string, input?: Record<string, unknown>, toolUseId?: string): void {
-    if (HIDDEN_TOOLS.has(name) || this.completed || this.errorMessage) return;
+    if (this.completed || this.errorMessage) return;
+    // Shape decides before any name-based hiding: the same payload arrives as `todo` on pi and
+    // as `TodoWrite` on Claude, and both have to feed the board.
+    const plan = parsePlanLike(input);
+    if (plan) {
+      this.todoItems = plan;
+      this.onTodosChanged?.(plan);
+    }
+    if (HIDDEN_TOOLS.has(name)) return;
     if (toolUseId && (this.toolIdToTimelineIndex.has(toolUseId) || this.sealedToolIds.has(toolUseId))) return;
     this.awaitingContinuation = false;
     this.onApiRetryCleared();
@@ -264,10 +280,28 @@ export class MessageRenderer {
     }
   }
 
-  onTodoUpdate(todos: Array<{ content: string; status: TodoStatus }>): void {
-    this.todoItems = todos;
+  onTodoUpdate(todos: PlanTodo[]): void {
+    if (this.completed || this.errorMessage) return;
+    this.acceptPlan(todos, ++this.nextPlanRevision);
     this.updateSplitPending();
+    this.forceFlush = true;
     this.scheduleFlush();
+  }
+
+  private acceptPlan(todos: PlanTodo[], revision: number): void {
+    if (revision < this.acceptedPlanRevision) return;
+    this.acceptedPlanRevision = revision;
+    this.todoItems = todos.map(item => ({ ...item, content: redactSensitiveContent(item.content) }));
+    this.onTodosChanged?.(structuredClone(this.todoItems));
+  }
+
+  private acceptToolPlan(toolUseId: string, entry: TimelineEntry): void {
+    if (this.completed || this.errorMessage || entry.status !== 'completed') return;
+    const inputPlan = parsePlanLike(entry.inputData);
+    const resultPlan = parsePlanFromToolResult(entry.toolResult, entry.toolName ?? '', inputPlan !== undefined);
+    const plan = resultPlan ?? inputPlan;
+    const revision = this.toolPlanRevisions.get(toolUseId);
+    if (plan !== undefined && revision !== undefined) this.acceptPlan(plan, revision);
   }
 
   onSessionInfo(info: {
@@ -323,6 +357,7 @@ export class MessageRenderer {
     const log = logIdx === undefined ? undefined : this.toolLogs[logIdx];
     if (entry?.status === 'running') entry.status = 'completed';
     if (log?.status === 'running') log.status = 'completed';
+    if (entry) this.acceptToolPlan(toolUseId, entry);
     if (this.currentTool?.toolId === toolUseId) this.currentTool = null;
     if (!this.completed && !this.errorMessage) {
       this.forceFlush = true;
@@ -358,6 +393,7 @@ export class MessageRenderer {
       this.toolLogs[logIndex].status = entry.status;
     }
     if (this.currentTool?.toolId === toolUseId) this.currentTool = null;
+    this.acceptToolPlan(toolUseId, entry);
     if (this.completed || this.errorMessage) return;
     this.updateSplitPending();
     this.forceFlush = true;

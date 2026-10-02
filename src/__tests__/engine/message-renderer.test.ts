@@ -206,7 +206,7 @@ describe('MessageRenderer', () => {
     });
     r.setUsageSummary('📊 10/4 tok | 2s');
     r.onToolStart('Bash');
-    r.onToolStart('TodoWrite');
+    r.onToolStart('TaskCreate');
     r.onToolStart('Read');
     r.onTextDelta('Here is the result.');
 
@@ -219,7 +219,7 @@ describe('MessageRenderer', () => {
     expect(content).toContain('🖥️ Bash ×1');
     expect(content).toContain('📖 Read ×1');
     expect(content).toContain('2 total');
-    expect(content).not.toContain('TodoWrite');
+    expect(content).not.toContain('TaskCreate');
     expect(content).toContain('[gpt-5.5] │ 思考 xhigh │ /home/user/workspace');
     expect(content).toContain('📊 10/4 tok | 2s');
     r.dispose();

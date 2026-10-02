@@ -7,6 +7,7 @@ import type { Button } from '../ui/types.js';
 import type { AgentProviderKind } from '../providers/kinds.js';
 import type { ActionCallbackRoute } from '../core/callbacks.js';
 import type { AgentProviderRuntimeMode } from '../providers/types.js';
+import type { PlanTodo } from '../canonical/plan-signature.js';
 
 export interface ChannelInfo {
   type: string;
@@ -360,7 +361,7 @@ export interface ProgressData {
   currentTool?: { name: string; input: string; elapsed: number } | null;
   permission?: { toolName: string; input: string; queueLength: number };
   renderedText: string;
-  todoItems: Array<{ content: string; status: string }>;
+  todoItems: PlanTodo[];
   footerLine?: string;
   /** Provider/runtime error message for failed tasks. */
   errorMessage?: string;

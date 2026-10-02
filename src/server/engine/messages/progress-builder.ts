@@ -7,6 +7,7 @@ import { redactSensitiveContent } from '../../../shared/utils/content-filter.js'
 import { getToolIcon } from '../sdk/tool-registry.js';
 import { shortPath } from '../../../shared/core/path.js';
 import type { TodoStatus } from '../../../shared/canonical/schema.js';
+import { TODO_MARKERS } from '../../../shared/canonical/plan-signature.js';
 import type { ToolLogEntry, TimelineEntry, MessageRendererState } from './renderer-types.js';
 import type { Button } from '../../../shared/ui/types.js';
 import { t, type Locale } from '../../../shared/i18n/index.js';
@@ -302,12 +303,9 @@ export class ProgressContentBuilder {
 
   private renderTodoProgress(todoItems: Array<{ content: string; status: TodoStatus }>): string {
     if (todoItems.length === 0) return '';
-    const done = todoItems.filter((t) => t.status === 'completed').length;
+    const done = todoItems.filter((item) => item.status === 'completed').length;
     const header = `📋 Progress (${done}/${todoItems.length})`;
-    const lines = todoItems.map((t) => {
-      const icon = t.status === 'completed' ? '✅' : t.status === 'in_progress' ? '🔧' : '⬜';
-      return `${icon} ${t.content}`;
-    });
+    const lines = todoItems.map((item) => `${TODO_MARKERS[item.status]} ${item.content}`);
     return `${header}\n${lines.join('\n')}`;
   }
 

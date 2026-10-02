@@ -177,7 +177,15 @@ const contextUsageSchema = z.object({
   percent: z.number().nullable(),
 });
 
-export const todoStatusSchema = z.enum(['pending', 'in_progress', 'completed']);
+// 'cancelled' carries dropped work (cancelled/skipped); 'blocked' carries stalled work. Neither
+// may collapse into pending, or a plan that stopped would look like one that has not started.
+export const todoStatusSchema = z.enum([
+  'pending',
+  'in_progress',
+  'completed',
+  'cancelled',
+  'blocked',
+]);
 
 const todoUpdateSchema = z.object({
   kind: z.literal('todo_update'),
