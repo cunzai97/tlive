@@ -121,6 +121,7 @@ export const en: Translations = {
   'progress.labelToolCalls': '🔧 Tool calls',
   'progress.labelToolSummary': '📝 Tool summary',
   'progress.labelWorkProgress': 'Work progress',
+  'progress.writingFile': '📝 Writing {target} · {lines} lines / {chars} chars generated',
   'progress.labelCurrentWait': 'Currently waiting',
   'progress.labelPendingApprovals': 'Pending approvals',
   'progress.labelElapsedTime': 'Elapsed time',

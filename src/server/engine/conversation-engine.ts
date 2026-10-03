@@ -205,7 +205,7 @@ interface ProcessMessageParams {
   onAgentComplete?: (data: { summary: string; status: string }) => void;
   onSubagentSnapshot?: (data: Extract<CanonicalEvent, { kind: 'subagent_snapshot' }>) => void;
   onPromptSuggestion?: (suggestion: string) => void;
-  onToolProgress?: (data: { toolName: string; elapsed: number }) => void;
+  onToolProgress?: (data: Extract<CanonicalEvent, { kind: 'tool_progress' }>) => void;
   onRateLimit?: (data: { status: string; utilization?: number; resetsAt?: number }) => void;
   onStatus?: (data: { sessionId: string; model?: string }) => void;
   onSessionInfo?: (data: {

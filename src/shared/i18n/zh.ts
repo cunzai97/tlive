@@ -121,6 +121,7 @@ export const zh: Translations = {
   'progress.labelToolCalls': '🔧 工具调用',
   'progress.labelToolSummary': '📝 工具调用摘要',
   'progress.labelWorkProgress': '工作进度',
+  'progress.writingFile': '📝 正在写入 {target} · 已生成 {lines} 行 / {chars} 字符',
   'progress.labelCurrentWait': '当前等待',
   'progress.labelPendingApprovals': '待处理审批',
   'progress.labelElapsedTime': '运行时长',

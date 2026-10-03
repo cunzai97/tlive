@@ -8,6 +8,7 @@ import { getToolIcon } from '../sdk/tool-registry.js';
 import { shortPath } from '../../../shared/core/path.js';
 import type { TodoStatus } from '../../../shared/canonical/schema.js';
 import { TODO_MARKERS } from '../../../shared/canonical/plan-signature.js';
+import type { LiveWriteProgress } from '../../../shared/formatting/message-types.js';
 import type { ToolLogEntry, TimelineEntry, MessageRendererState } from './renderer-types.js';
 import type { Button } from '../../../shared/ui/types.js';
 import { t, type Locale } from '../../../shared/i18n/index.js';
@@ -48,6 +49,7 @@ export interface RenderInput {
   toolCounts: Map<string, number>;
   bubbleToolCount: number;
   currentTool: { name: string; input: string; elapsed: number } | null;
+  liveWrite?: LiveWriteProgress | null;
   todoItems: Array<{ content: string; status: TodoStatus }>;
   toolLogs: ToolLogEntry[];
   timeline: TimelineEntry[];
@@ -148,6 +150,7 @@ export class ProgressContentBuilder {
       errorMessage: input.errorMessage,
       permissionRequests: input.permissionRequests,
       currentTool: input.currentTool,
+      liveWrite: input.liveWrite,
       todoItems: input.todoItems,
       thinkingText: input.thinkingText,
       toolLogs: input.toolLogs,
@@ -344,6 +347,7 @@ export function buildProgressData(
     toolSummary: state.toolSummary,
     footerLine: state.footerLine,
     currentTool: state.currentTool,
+    liveWrite: state.liveWrite,
     permission: state.permission,
     permissionRequests: state.permissionRequests,
     todoItems: state.todoItems,

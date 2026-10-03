@@ -53,6 +53,16 @@ const toolProgressSchema = z.object({
   kind: z.literal('tool_progress'),
   toolName: z.string(),
   elapsed: z.number(),
+  /**
+   * A write call whose arguments are still being streamed. The tool block does not exist yet —
+   * pi only emits tool_execution_start once the arguments are complete — so this is the only way
+   * to show the file while the model is producing it. Optional so an older producer keeps meaning
+   * "elapsed time" alone, and an older reader strips these keys instead of rejecting the event.
+   */
+  path: z.string().optional(),
+  contentTail: z.string().optional(),
+  contentChars: z.number().optional(),
+  contentLines: z.number().optional(),
 });
 
 const agentUsageSchema = z.object({

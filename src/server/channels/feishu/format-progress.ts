@@ -3,6 +3,7 @@ import type { Locale } from '../../../shared/i18n/index.js';
 import { t } from '../../../shared/i18n/index.js';
 import type { ProgressData } from '../../../shared/formatting/message-types.js';
 import { truncate } from '../../../shared/core/string.js';
+import { shortPath } from '../../../shared/core/path.js';
 import { TODO_MARKERS } from '../../../shared/canonical/plan-signature.js';
 import type { FeishuCardElement } from './card-builder.js';
 import type { SubagentCardChunk } from './subagent-budget.js';
@@ -191,6 +192,24 @@ export function buildProgressTimelineElements(params: FormatProgressParams): Fei
   return elements;
 }
 
+/**
+ * The file a model is still writing. It exists only while the call has no timeline block of its
+ * own, so nothing here needs a terminal-state counterpart: the write's own card takes over.
+ */
+function liveWriteElements(params: FormatProgressParams): FeishuCardElement[] {
+  const live = params.data.liveWrite;
+  if (!live) return [];
+  const line = params.md(
+    t('progress.writingFile', params.locale)
+      .replace('{target}', shortPath(live.path ?? live.name))
+      .replace('{lines}', String(live.contentLines))
+      .replace('{chars}', String(live.contentChars)),
+  );
+  // Redact before slicing: a tail cut through a credential must not defeat redaction.
+  const preview = thinkingTail(redactSensitiveContent(live.contentTail));
+  return preview.text ? [line, codeBlockElement(preview.text)] : [line];
+}
+
 /** Only supplemental state, never a second copy of the timeline's model output. */
 export function buildProgressContentElements(params: FormatProgressParams): FeishuCardElement[] {
   if (params.flowOptions?.mode === 'legacy') return buildLegacyContentElements(params);
@@ -219,12 +238,14 @@ export function buildProgressContentElements(params: FormatProgressParams): Feis
       );
     }
     elements.push(md(`**${t('progress.labelElapsedTime', locale)}** ${data.elapsedSeconds}s`));
+    elements.push(...liveWriteElements(params));
   } else if (!isDone) {
     const status = [
       data.totalTools > 0 ? `${data.totalTools} tools` : '',
       `${data.elapsedSeconds}s`,
     ].filter(Boolean);
     elements.push(md(`⏳ ${status.join(' · ')}`));
+    elements.push(...liveWriteElements(params));
   }
 
   // With a timeline, renderedText is no longer used as an error carrier. Provider failures

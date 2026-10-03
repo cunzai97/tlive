@@ -2,7 +2,8 @@
  * Shared types for message rendering — extracted to avoid circular dependency.
  */
 
-import type { TodoStatus } from '../../../shared/canonical/schema.js';
+import type { CanonicalEvent, TodoStatus } from '../../../shared/canonical/schema.js';
+import type { LiveWriteProgress } from '../../../shared/formatting/message-types.js';
 
 /** Tool call log entry for detailed display */
 export type PresentationToolStatus = 'running' | 'completed' | 'failed' | 'interrupted';
@@ -44,6 +45,12 @@ export interface CurrentTool {
   elapsed: number; // Seconds
 }
 
+/**
+ * A forwarded `tool_progress` event. Producers that only report elapsed time omit the write
+ * fields; a producer streaming a file writer's arguments supplies all of them together.
+ */
+export type ToolProgressSignal = Omit<Extract<CanonicalEvent, { kind: 'tool_progress' }>, 'kind'>;
+
 /** Renderer state snapshot for progress display */
 export interface MessageRendererState {
   turnId?: string;
@@ -60,6 +67,7 @@ export interface MessageRendererState {
   errorMessage?: string;
   permissionRequests: number;
   currentTool: CurrentTool | null;
+  liveWrite?: LiveWriteProgress | null;
   todoItems: Array<{ content: string; status: TodoStatus }>;
   thinkingText: string;
   toolLogs: ToolLogEntry[];

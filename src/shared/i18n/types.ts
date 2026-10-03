@@ -123,6 +123,7 @@ export interface Translations {
   'progress.labelToolCalls': string;
   'progress.labelToolSummary': string;
   'progress.labelWorkProgress': string;
+  'progress.writingFile': string;
   'progress.labelCurrentWait': string;
   'progress.labelPendingApprovals': string;
   'progress.labelElapsedTime': string;

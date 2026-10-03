@@ -162,6 +162,86 @@ describe('PiAdapter', () => {
   });
 });
 
+describe('PiAdapter live write progress', () => {
+  const updateWith = (type: string, block: Record<string, unknown>) => ({
+    type: 'message_update',
+    message: {},
+    assistantMessageEvent: { type, contentIndex: 0, delta: 'x', partial: { content: [block] } },
+  });
+  const writeBlock = (content: string, overrides: Record<string, unknown> = {}) => ({
+    type: 'toolCall',
+    id: 'call-1',
+    name: 'write',
+    arguments: { path: 'src/a.ts', content },
+    ...overrides,
+  });
+
+  it('publishes the streaming file as a tool_progress snapshot', () => {
+    const adapter = new PiAdapter({ sessionId: 'pi-session' });
+
+    expect(adapter.mapEvent(updateWith('toolcall_delta', writeBlock('line1\nline2\n')) as any)).toEqual([
+      {
+        kind: 'tool_progress',
+        toolName: 'write',
+        elapsed: 0,
+        path: 'src/a.ts',
+        contentTail: 'line1\nline2\n',
+        contentChars: 12,
+        contentLines: 3,
+      },
+    ]);
+  });
+
+  it('stays silent until the call is recognisably a file writer', () => {
+    const adapter = new PiAdapter({ sessionId: 'pi-session' });
+
+    expect(adapter.mapEvent(updateWith('toolcall_delta', {
+      type: 'toolCall', id: 'c2', name: 'bash', arguments: { command: 'ls' },
+    }) as any)).toEqual([]);
+    expect(adapter.mapEvent(updateWith('toolcall_delta', {
+      type: 'toolCall', id: 'c3', arguments: { content: 'unnamed so far' },
+    }) as any)).toEqual([]);
+    expect(adapter.mapEvent(updateWith('toolcall_delta', {
+      type: 'toolCall', id: 'c4', name: 'write', arguments: { path: 'src/b.ts' },
+    }) as any)).toEqual([]);
+  });
+
+  it('throttles deltas but never withholds the finished arguments', () => {
+    const adapter = new PiAdapter({ sessionId: 'pi-session' });
+    const first = adapter.mapEvent(updateWith('toolcall_delta', writeBlock('a\n')) as any);
+    const second = adapter.mapEvent(updateWith('toolcall_delta', writeBlock('a\nb\n')) as any);
+    const end = adapter.mapEvent(updateWith('toolcall_end', writeBlock('a\nb\nc\n')) as any);
+
+    expect(first).toHaveLength(1);
+    expect(second).toEqual([]);
+    expect(end[0]).toMatchObject({ contentTail: 'a\nb\nc\n', contentChars: 6, contentLines: 4 });
+  });
+
+  it('bounds the wire payload to a tail window while reporting the true totals', () => {
+    const adapter = new PiAdapter({ sessionId: 'pi-session' });
+    const content = `${'h'.repeat(9_000)}\nlast`;
+
+    const [event] = adapter.mapEvent(updateWith('toolcall_end', writeBlock(content)) as any) as any[];
+
+    expect(event.contentTail).toHaveLength(4_000);
+    expect(event.contentTail).toBe(content.slice(-4_000));
+    expect(event.contentChars).toBe(content.length);
+    expect(event.contentLines).toBe(2);
+  });
+
+  it('starts each turn unthrottled, since the adapter lives for one turn', () => {
+    const first = new PiAdapter({ sessionId: 'pi-session' }).mapEvent(
+      updateWith('toolcall_delta', writeBlock('a\n')) as any,
+    );
+    const nextTurn = new PiAdapter({ sessionId: 'pi-session' }).mapEvent(
+      updateWith('toolcall_delta', writeBlock('a\nb\n')) as any,
+    );
+
+    expect(first).toHaveLength(1);
+    expect(nextTurn).toHaveLength(1);
+  });
+});
+
 function assistantUsage(input: number, output: number, cacheRead: number): unknown {
   return {
     role: 'assistant',

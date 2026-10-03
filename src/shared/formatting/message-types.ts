@@ -350,6 +350,21 @@ export interface ErrorData {
   message: string;
 }
 
+/**
+ * A write call whose arguments are still streaming. The tool block does not exist yet — pi only
+ * announces `tool_execution_start` once the arguments are complete — so this is the sole way to
+ * show the file while the model is producing it. Cleared as soon as a real block takes over.
+ */
+export interface LiveWriteProgress {
+  /** Writer name, shown when the path has not streamed in yet. */
+  name: string;
+  /** Tail window only: older content scrolled out and is never shown again. */
+  contentTail: string;
+  path?: string;
+  contentChars: number;
+  contentLines: number;
+}
+
 /** Progress update (for streaming) */
 export interface ProgressData {
   /** A child progress stream is exactly one mutable physical card, never lossless overflow. */
@@ -359,6 +374,7 @@ export interface ProgressData {
   taskSummary: string;
   elapsedSeconds: number;
   currentTool?: { name: string; input: string; elapsed: number } | null;
+  liveWrite?: LiveWriteProgress | null;
   permission?: { toolName: string; input: string; queueLength: number };
   renderedText: string;
   todoItems: PlanTodo[];

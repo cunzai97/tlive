@@ -29,6 +29,25 @@ describe('message-schema', () => {
     }
   });
 
+  it('carries a streaming write snapshot without breaking either direction', () => {
+    const elapsedOnly = { kind: 'tool_progress', toolName: 'Bash', elapsed: 5000 };
+    const streamingWrite = {
+      ...elapsedOnly,
+      toolName: 'write',
+      elapsed: 0,
+      path: 'src/a.ts',
+      contentTail: 'generated so far',
+      contentChars: 16,
+      contentLines: 1,
+    };
+
+    expect(canonicalEventSchema.parse(streamingWrite)).toEqual(streamingWrite);
+    // An older worker sends exactly the elapsed pair, so it keeps meaning "elapsed time" alone.
+    expect(canonicalEventSchema.parse(elapsedOnly)).toEqual(elapsedOnly);
+    // An older bridge never declared the write keys: it strips them instead of closing the socket.
+    expect(canonicalEventSchema.parse({ ...streamingWrite, someFutureKey: 'x' })).toEqual(streamingWrite);
+  });
+
   it('strips unknown fields at the canonical boundary', () => {
     const result = canonicalEventSchema.parse({ kind: 'text_delta', text: 'hi', futureField: 42 });
     expect((result as Record<string, unknown>).futureField).toBeUndefined();

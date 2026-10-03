@@ -10,12 +10,14 @@ import { parsePlanLike, parsePlanFromToolResult, type PlanTodo } from '../../../
 import type { VerboseLevel } from '../state/session-state.js';
 import type { Button } from '../../../shared/ui/types.js';
 import type { AgentRuntimeInfo } from '../../../shared/providers/base.js';
+import type { LiveWriteProgress } from '../../../shared/formatting/message-types.js';
 import { ProgressContentBuilder } from './progress-builder.js';
 import type { RenderInput } from './progress-builder.js';
 import type {
   ToolLogEntry,
   TimelineEntry,
   CurrentTool,
+  ToolProgressSignal,
   MessageRendererState,
 } from './renderer-types.js';
 import { PermissionTracker } from './permission-tracker.js';
@@ -88,6 +90,7 @@ export class MessageRenderer {
   private footerLine?: string;
   private errorMessage?: string;
   private currentTool: CurrentTool | null = null;
+  private liveWrite: LiveWriteProgress | null = null;
   private todoItems: PlanTodo[] = [];
   private readonly onTodosChanged?: (items: PlanTodo[]) => void;
   private nextPlanRevision = 0;
@@ -235,6 +238,8 @@ export class MessageRenderer {
     const inputData = input ? clonePresentationInput(input) : undefined;
     const formattedInput = redactSensitiveContent(formatToolInput(name, inputData));
     this.currentTool = { name, input: formattedInput, elapsed: 0, toolId };
+    // The authoritative block has arrived; the streamed preview would only duplicate it.
+    this.liveWrite = null;
 
     const logIndex = this.toolLogs.length;
     this.toolLogs.push({ name, input: formattedInput, toolId, inputData, status: 'running' });
@@ -273,8 +278,21 @@ export class MessageRenderer {
     this.scheduleFlush();
   }
 
-  onToolProgress(data: { toolName: string; elapsed: number }): void {
+  onToolProgress(data: ToolProgressSignal): void {
     if (HIDDEN_TOOLS.has(data.toolName)) return;
+    if (typeof data.contentTail === 'string' && typeof data.contentChars === 'number' && typeof data.contentLines === 'number') {
+      if (this.completed || this.errorMessage) return;
+      this.liveWrite = {
+        name: data.toolName,
+        contentTail: data.contentTail,
+        ...(data.path ? { path: data.path } : {}),
+        contentChars: data.contentChars,
+        contentLines: data.contentLines,
+      };
+      this.forceFlush = true;
+      this.scheduleFlush();
+      return;
+    }
     if (this.currentTool && this.currentTool.name === data.toolName) {
       this.currentTool.elapsed = Math.floor(data.elapsed / 1000);
     }
@@ -533,6 +551,7 @@ export class MessageRenderer {
       toolCounts: this.toolCounts,
       bubbleToolCount: this.bubbleToolCount,
       currentTool: this.currentTool,
+      liveWrite: this.liveWrite,
       todoItems: this.todoItems,
       toolLogs: this.toolLogs,
       timeline: this.timeline,
@@ -624,7 +643,7 @@ export class MessageRenderer {
     if (!this._messageId) await this.flushProgress();
     if (this.timer) { clearTimeout(this.timer); this.timer = null; }
     const input = { ...this.getRenderInput(), completed: true, phase: 'completed' as const,
-      presentationBoundary: true, footerLine: undefined };
+      presentationBoundary: true, liveWrite: null, footerLine: undefined };
     const content = this.contentBuilder.render(input);
     const state = this.contentBuilder.getStateSnapshot(input, content);
     this.forceFlush = true;
@@ -753,6 +772,7 @@ export class MessageRenderer {
       }
     }
     this.currentTool = null;
+    this.liveWrite = null;
     this.pendingToolResults.clear();
   }
 
@@ -767,6 +787,7 @@ export class MessageRenderer {
     this.lastTimelineIsText = false;
     this.bubbleToolCount = 0;
     this.bubbleTimelineCount = 0;
+    this.liveWrite = null;
     this.lastRenderedContent = '';
   }
 

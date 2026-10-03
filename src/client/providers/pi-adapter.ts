@@ -9,13 +9,22 @@ interface PiAdapterState {
   startedTools: Set<string>;
   terminalEmitted: boolean;
   pendingMessages?: unknown[];
+  /** When a streaming file was last snapshotted, per assistant content index. */
+  liveWriteAt: Map<number, number>;
 }
+
+/** pi names its file writer `write`; the other spelling covers renamed providers. */
+const LIVE_WRITE_TOOLS = new Set(['write', 'Write']);
+const LIVE_WRITE_TAIL_CHARS = 4_000;
+/** The card repaints every 400ms, so a faster cadence would only be discarded downstream. */
+const LIVE_WRITE_MIN_INTERVAL_MS = 300;
 
 export class PiAdapter {
   private readonly subagents = new PiSubagentMapper();
   private state: PiAdapterState = {
     startedTools: new Set(),
     terminalEmitted: false,
+    liveWriteAt: new Map(),
   };
 
   constructor(options: { sessionId?: string; model?: string; reasoningEffort?: string } = {}) {
@@ -164,7 +173,36 @@ export class PiAdapter {
       events.push({ kind: 'text_delta', text: event.delta });
     } else if (event.type === 'thinking_delta') {
       events.push({ kind: 'thinking_delta', text: event.delta });
+    } else if (event.type === 'toolcall_delta') {
+      this.mapLiveWrite(event.contentIndex, event.partial, false, events);
+    } else if (event.type === 'toolcall_end') {
+      this.mapLiveWrite(event.contentIndex, event.partial, true, events);
     }
+  }
+
+  /**
+   * pi's write tool never reports execution progress — its `execute()` ignores the update sink —
+   * so the only live view of a file being written is the model's still-streaming call arguments.
+   * pi already repairs and decodes those on every delta, and sending a tail window keeps the wire
+   * cost linear without an accumulator that the salvage parser could invalidate by rewriting.
+   */
+  private mapLiveWrite(contentIndex: number, partial: unknown, finalize: boolean, events: CanonicalEvent[]): void {
+    const writing = liveWriteContent(partial, contentIndex);
+    if (!writing) return;
+    if (!finalize) {
+      const last = this.state.liveWriteAt.get(contentIndex) ?? 0;
+      if (Date.now() - last < LIVE_WRITE_MIN_INTERVAL_MS) return;
+      this.state.liveWriteAt.set(contentIndex, Date.now());
+    }
+    events.push({
+      kind: 'tool_progress',
+      toolName: writing.name,
+      elapsed: 0,
+      ...(writing.path ? { path: writing.path } : {}),
+      contentTail: writing.content.slice(-LIVE_WRITE_TAIL_CHARS),
+      contentChars: writing.content.length,
+      contentLines: countLines(writing.content),
+    });
   }
 
   private queryResult(
@@ -186,6 +224,29 @@ export class PiAdapter {
       ...(latestError ? { error: latestError } : {}),
     };
   }
+}
+
+function liveWriteContent(
+  partial: unknown,
+  contentIndex: number,
+): { name: string; path?: string; content: string } | undefined {
+  const blocks = (partial as { content?: unknown } | undefined)?.content;
+  if (!Array.isArray(blocks)) return undefined;
+  const block = blocks[contentIndex] as Record<string, unknown> | undefined;
+  if (!block || block.type !== 'toolCall') return undefined;
+  // The provider may not have named the call yet, and nothing can be gated on an unknown tool.
+  if (!LIVE_WRITE_TOOLS.has(String(block.name ?? ''))) return undefined;
+  const args = block.arguments as Record<string, unknown> | undefined;
+  const content = typeof args?.content === 'string' ? args.content : '';
+  if (!content || typeof block.id !== 'string' || !block.id) return undefined;
+  const path = typeof args?.path === 'string' && args.path ? args.path : undefined;
+  return { name: String(block.name), path, content };
+}
+
+function countLines(text: string): number {
+  let lines = 1;
+  for (let at = text.indexOf('\n'); at >= 0; at = text.indexOf('\n', at + 1)) lines++;
+  return lines;
 }
 
 function normalizeToolInput(input: unknown): Record<string, unknown> {

@@ -493,4 +493,90 @@ describe('MessageRenderer', () => {
 
     renderer.dispose();
   });
+
+  it('shows a streaming write and hands over to the tool block once it starts', async () => {
+    const renderer = createRenderer();
+
+    renderer.onToolProgress({
+      toolName: 'write',
+      elapsed: 0,
+      path: 'src/a.ts',
+      contentTail: 'line1\nline2\n',
+      contentChars: 12,
+      contentLines: 3,
+    });
+    await advance(500);
+    expect(flushCallback.mock.calls.at(-1)?.[3]?.liveWrite).toEqual({
+      name: 'write',
+      path: 'src/a.ts',
+      contentTail: 'line1\nline2\n',
+      contentChars: 12,
+      contentLines: 3,
+    });
+
+    renderer.onToolStart('write', { path: 'src/a.ts' }, 'call-1');
+    await advance(500);
+    expect(flushCallback.mock.calls.at(-1)?.[3]?.liveWrite).toBeNull();
+    expect(flushCallback.mock.calls.at(-1)?.[3]?.currentTool).toMatchObject({ name: 'write' });
+
+    renderer.dispose();
+  });
+
+  it('treats an elapsed-only progress event as elapsed-only', async () => {
+    const renderer = createRenderer();
+
+    renderer.onToolStart('Bash', { command: 'sleep 9' }, 'call-1');
+    await advance(500);
+    renderer.onToolProgress({ toolName: 'Bash', elapsed: 9000 });
+    renderer.onTodoUpdate([{ content: 'still running', status: 'pending' }]);
+    await advance(500);
+
+    const state = flushCallback.mock.calls.at(-1)?.[3];
+    expect(state?.liveWrite).toBeNull();
+    expect(state?.currentTool).toMatchObject({ name: 'Bash', elapsed: 9 });
+
+    renderer.dispose();
+  });
+
+  it('never carries a streaming write into a terminal frame', async () => {
+    const renderer = createRenderer();
+
+    renderer.onToolProgress({
+      toolName: 'write',
+      elapsed: 0,
+      contentTail: 'half a file',
+      contentChars: 11,
+      contentLines: 1,
+    });
+    await advance(500);
+    expect(flushCallback.mock.calls.at(-1)?.[3]?.liveWrite).toBeTruthy();
+
+    await renderer.onError('Interrupted');
+    const last = flushCallback.mock.calls.at(-1)?.[3];
+    expect(last?.liveWrite).toBeNull();
+    expect(last?.phase).toBe('failed');
+
+    renderer.dispose();
+  });
+
+  it('drops the streaming write when the bubble splits into a continuation', async () => {
+    const renderer = createRenderer();
+
+    renderer.onTextDelta('drafting the file now');
+    renderer.onToolProgress({
+      toolName: 'write',
+      elapsed: 0,
+      contentTail: 'half a file',
+      contentChars: 11,
+      contentLines: 1,
+    });
+    await advance(500);
+    expect(flushCallback.mock.calls.at(-1)?.[3]?.liveWrite).toBeTruthy();
+
+    await renderer.sealForContinuation();
+
+    expect(flushCallback.mock.calls.at(-1)?.[3]?.liveWrite).toBeNull();
+
+    renderer.dispose();
+  });
 });
