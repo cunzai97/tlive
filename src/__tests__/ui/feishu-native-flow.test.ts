@@ -1,5 +1,6 @@
 import type { Client } from '@larksuiteoapi/node-sdk';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { FEISHU_SNAPSHOT_REFRESH_MS } from '../../shared/feishu-card-config.js';
 import type { ProgressData } from '../../shared/formatting/message-types.js';
 import { QueryPresentationFactory } from '../../server/engine/coordinators/query-presentation.js';
 import { classifyDefaultError } from '../../server/channels/errors.js';
@@ -38,6 +39,8 @@ let client: Client;
 let adapter: FeishuAdapter;
 let maxBytes: number;
 const snapshots: Array<Record<string, any>> = [];
+/** Every timing assertion here means "one configured refresh interval", not a magic 400. */
+const REFRESH = FEISHU_SNAPSHOT_REFRESH_MS;
 
 function nodes(value: unknown): Array<Record<string, any>> {
   if (!value || typeof value !== 'object') return [];
@@ -183,10 +186,10 @@ describe('native flow on the real Feishu presentation/sender path', () => {
     try {
       if (startupCard) {
         turn.renderer.onSessionInfo({ tools: [] });
-        await vi.advanceTimersByTimeAsync(1000);
+        await vi.advanceTimersByTimeAsync(REFRESH);
       }
       turn.renderer.onThinkingDelta('我先分析');
-      await vi.advanceTimersByTimeAsync(startupCard ? 500 : 120);
+      await vi.advanceTimersByTimeAsync(REFRESH);
       expect(sdk.imReply).toHaveBeenCalledTimes(1);
       expect(typing.stop).toHaveBeenCalledTimes(1);
       const firstMessage = [...messages.keys()][0];
@@ -199,14 +202,14 @@ describe('native flow on the real Feishu presentation/sender path', () => {
       expect(JSON.stringify(firstCard)).not.toContain('Starting');
       const firstElement = sdk.text.mock.calls.find(([request]) => request.data.content === fenced('我先分析'))![0].path;
       turn.renderer.onThinkingDelta('，还在继续思考');
-      await vi.advanceTimersByTimeAsync(500);
+      await vi.advanceTimersByTimeAsync(REFRESH);
       expect(sdk.text.mock.calls.some(([request]) => request.path.card_id === firstElement.card_id &&
         request.path.element_id === firstElement.element_id && request.data.content === fenced('我先分析，还在继续思考'))).toBe(true);
       expect(nodes(remoteMessage(firstMessage)).find((node) => node.tag === 'collapsible_panel')!.expanded).toBe(true);
       expect(sdk.cardCreate).toHaveBeenCalledTimes(1);
       expect(sdk.imPatch).not.toHaveBeenCalled();
       turn.renderer.onTextDelta('思考结束，开始回答');
-      await vi.advanceTimersByTimeAsync(1000);
+      await vi.advanceTimersByTimeAsync(REFRESH);
       expect(nodes(remoteMessage(firstMessage)).find((node) => node.tag === 'collapsible_panel')!.expanded).toBe(false);
       await settle(turn.renderer.onComplete());
       expect(remoteMessage(firstMessage).config.streaming_mode).toBe(false);
@@ -407,8 +410,8 @@ async function withSnapshotTurn(
   finally { turn.renderer.dispose(); await ordinary.stop(); }
 }
 
-describe('400ms latest-state snapshots without a typing animation', () => {
-  it('shows the first thought immediately and replaces long/fast output at 400ms without CardKit', async () => {
+describe('configured-interval latest-state snapshots without a typing animation', () => {
+  it('shows the first thought immediately and replaces long/fast output every refresh without CardKit', async () => {
     await withSnapshotTurn(async (turn, ordinary) => {
       expect(ordinary.usesNativeProgressStreaming()).toBe(false);
       expect(ordinary.format({ type: 'progress', chatId: 'chat', data: progress([]) }).feishuStreaming).toBeUndefined();
@@ -423,15 +426,15 @@ describe('400ms latest-state snapshots without a typing animation', () => {
       expect(nodes(remoteMessage(id)).find((node) => node.tag === 'collapsible_panel')!.expanded).toBe(true);
       expect(messages.get(id)).toContain('第一段思考');
       turn.renderer.onThinkingDelta('，继续分析');
-      await vi.advanceTimersByTimeAsync(399);
+      await vi.advanceTimersByTimeAsync(REFRESH - 1);
       expect(sdk.imPatch).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(1);
-      expect(updates.map(time => time - start)).toEqual([400]);
+      expect(updates.map(time => time - start)).toEqual([REFRESH]);
       expect(messages.get(id)).toContain('第一段思考，继续分析');
       const text = '正文' + 'x'.repeat(12000);
       turn.renderer.onTextDelta(text);
-      await vi.advanceTimersByTimeAsync(400);
-      expect(updates.map(time => time - start)).toEqual([400, 800]);
+      await vi.advanceTimersByTimeAsync(REFRESH);
+      expect(updates.map(time => time - start)).toEqual([REFRESH, REFRESH * 2]);
       expect(messages.get(id)).toContain(text);
       expect(nodes(remoteMessage(id)).find((node) => node.tag === 'collapsible_panel')!.expanded).toBe(false);
       await vi.advanceTimersByTimeAsync(1000);
@@ -449,7 +452,7 @@ describe('400ms latest-state snapshots without a typing animation', () => {
     });
   });
 
-  it('does not add another 400ms after a slow first send and coalesces its pending deltas', async () => {
+  it('does not add another refresh interval after a slow first send and coalesces its pending deltas', async () => {
     await withSnapshotTurn(async (turn) => {
       const send = sdk.imReply.getMockImplementation()!;
       sdk.imReply.mockImplementationOnce(async (...args) => {
@@ -468,8 +471,8 @@ describe('400ms latest-state snapshots without a typing animation', () => {
       expect(sdk.imReply).toHaveBeenCalledTimes(1);
       expect(sdk.imPatch).not.toHaveBeenCalled();
       turn.renderer.onThinkingDelta('四');
-      await vi.advanceTimersByTimeAsync(250);
-      expect(updates.map(time => time - start)).toEqual([400]);
+      await vi.advanceTimersByTimeAsync(REFRESH - 150);
+      expect(updates.map(time => time - start)).toEqual([REFRESH]);
       expect([...messages.values()][0]).toContain('一二三四');
       expect(sdk.imReply).toHaveBeenCalledTimes(1);
       await settle(turn.renderer.onComplete());
@@ -481,29 +484,33 @@ describe('400ms latest-state snapshots without a typing animation', () => {
       const updates: Array<{ at: number; content: string }> = [];
       const patch = sdk.imPatch.getMockImplementation()!;
       let inflight = 0; let maxInflight = 0;
+      // Slower than one interval, so the anchored cadence has no wait left once it returns.
+      const slow = REFRESH + 200;
+      const step = Math.floor(slow / 6);
       sdk.imPatch.mockImplementation(async (request) => {
         inflight++; maxInflight = Math.max(maxInflight, inflight);
         updates.push({ at: Date.now(), content: request.data.content });
-        try { await new Promise(resolve => setTimeout(resolve, 600)); return await patch(request); }
+        try { await new Promise(resolve => setTimeout(resolve, slow)); return await patch(request); }
         finally { inflight--; }
       });
       const start = Date.now();
       turn.renderer.onThinkingDelta('开始');
       await vi.advanceTimersByTimeAsync(0);
       turn.renderer.onThinkingDelta('第一批');
-      await vi.advanceTimersByTimeAsync(400);
+      await vi.advanceTimersByTimeAsync(REFRESH);
       for (const delta of ['二', '三', '四', '五', '最新']) {
-        await vi.advanceTimersByTimeAsync(100);
+        await vi.advanceTimersByTimeAsync(step);
         turn.renderer.onThinkingDelta(delta);
       }
-      await vi.advanceTimersByTimeAsync(100);
+      await vi.advanceTimersByTimeAsync(slow - step * 5);
       // A zero-delay continuation runs on the next timer tick, not inside the
       // just-completed request's callback.
       await vi.advanceTimersByTimeAsync(1);
-      expect(updates.map(update => update.at - start)).toEqual([400, 1001]);
+      expect(updates.map(update => update.at - start)).toEqual([REFRESH, REFRESH + slow + 1]);
       expect(updates[1].content).toContain('开始第一批二三四五最新');
       expect(maxInflight).toBe(1);
-      await vi.advanceTimersByTimeAsync(600);
+      // The recorded request is the wire call; the stored message only changes once it lands.
+      await vi.advanceTimersByTimeAsync(slow + 1);
       expect([...messages.values()][0]).toContain('开始第一批二三四五最新');
       expect(updates).toHaveLength(2);
       await settle(turn.renderer.onComplete());
@@ -523,7 +530,7 @@ describe('400ms latest-state snapshots without a typing animation', () => {
       const open = callbackActions(remoteMessage(source)).find(action => action.startsWith('flow_detail:open:'))!;
       expect(open).toBeTruthy();
       turn.renderer.onThinkingDelta('新的思考'.repeat(1200) + 'LATEST_THOUGHT_END');
-      await vi.advanceTimersByTimeAsync(400);
+      await vi.advanceTimersByTimeAsync(REFRESH);
       expect(messages.size).toBe(1);
       const main = messages.get(source)!;
       expect(main).toContain('LATEST_THOUGHT_END');
@@ -550,7 +557,7 @@ describe('400ms latest-state snapshots without a typing animation', () => {
     });
   });
 
-  it('protects each physical snapshot message at 400ms even for rapid terminal/state changes', async () => {
+  it('protects each physical snapshot message at the refresh interval even for rapid state changes', async () => {
     await withSnapshotTurn(async (_turn, ordinary) => {
       const render = (text: string, phase: ProgressData['phase'] = 'executing') => ordinary.format({
         type: 'progress', chatId: 'chat', data: progress([{ kind: 'text', blockId: 'answer', text }], { phase }),
@@ -567,13 +574,13 @@ describe('400ms latest-state snapshots without a typing animation', () => {
       const terminal = ordinary.editMessage('chat', sent.messageId, render('ABCD', 'completed'));
       await vi.advanceTimersByTimeAsync(0);
       expect(updates.map(time => time - start)).toEqual([0]);
-      await vi.advanceTimersByTimeAsync(399);
+      await vi.advanceTimersByTimeAsync(REFRESH - 1);
       expect(updates).toHaveLength(1);
       await vi.advanceTimersByTimeAsync(1);
-      expect(updates.map(time => time - start)).toEqual([0, 400]);
-      await vi.advanceTimersByTimeAsync(400);
+      expect(updates.map(time => time - start)).toEqual([0, REFRESH]);
+      await vi.advanceTimersByTimeAsync(REFRESH);
       await Promise.all([first, second, terminal]);
-      expect(updates.map(time => time - start)).toEqual([0, 400, 800]);
+      expect(updates.map(time => time - start)).toEqual([0, REFRESH, REFRESH * 2]);
       expect(messages.get(sent.messageId)).toContain('ABCD');
       expect(sdk.imCreate).toHaveBeenCalledTimes(1);
     });

@@ -10,9 +10,12 @@ import type { InboundMessage, RenderedMessage, SendResult } from '../../server/c
 import { SubagentFlowPresenter } from '../../server/presentation/subagent-presenter.js';
 import type { SubagentSnapshot } from '../../shared/canonical/schema.js';
 import type { FormattableMessage, ProgressData } from '../../shared/formatting/message-types.js';
+import { FEISHU_SNAPSHOT_REFRESH_MS } from '../../shared/feishu-card-config.js';
 
 const instances: Array<{ presenter: SubagentFlowPresenter; details: FeishuToolDetails }> = [];
 const releases: Array<() => void> = [];
+/** Child cards share the main card's cadence, so every tick here means one refresh interval. */
+const REFRESH = FEISHU_SNAPSHOT_REFRESH_MS;
 
 function deferred<T>(fallback: T) {
   let resolve!: (value: T) => void;
@@ -131,7 +134,7 @@ describe('SubagentFlowPresenter', () => {
     expect(f.data.every((data) => data.turnId?.startsWith('trusted-parent-turn:subagent:'))).toBe(true);
     children.forEach((child) => f.presenter.update({ ...child, status: 'completed' }));
     gate.resolve({ success: true, messageId: 'unused' });
-    await vi.advanceTimersByTimeAsync(400);
+    await vi.advanceTimersByTimeAsync(REFRESH);
     await f.presenter.finish();
     expect(f.adapter.send).toHaveBeenCalledTimes(5);
     expect(f.adapter.editMessage).toHaveBeenCalledTimes(5);
@@ -143,7 +146,7 @@ describe('SubagentFlowPresenter', () => {
     expect(f.adapter.shouldSplitCompletedTrace).not.toHaveBeenCalled();
   });
 
-  it('paces every physical child at 400ms from request start, including terminal patches', async () => {
+  it('paces every physical child at the refresh interval from request start, including terminal patches', async () => {
     const f = fixture();
     for (let child = 0; child < 5; child++) f.presenter.update(snapshot(String(child)));
     await settle();
@@ -154,18 +157,18 @@ describe('SubagentFlowPresenter', () => {
       }
     }
     expect(f.requests).toHaveLength(5);
-    await vi.advanceTimersByTimeAsync(99);
+    await vi.advanceTimersByTimeAsync(REFRESH - 301);
     expect(f.requests).toHaveLength(5);
     await vi.advanceTimersByTimeAsync(1);
     expect(f.requests).toHaveLength(10);
     expect(f.data.slice(5).every((data) => data.thinkingText === 'step 3')).toBe(true);
     for (let child = 0; child < 5; child++) f.presenter.update(snapshot(String(child), { status: 'completed' }));
     const finished = f.presenter.finish();
-    await vi.advanceTimersByTimeAsync(400);
+    await vi.advanceTimersByTimeAsync(REFRESH);
     await finished;
     for (const id of new Set(f.requests.map((request) => request.messageId))) {
       expect(f.requests.filter((request) => request.messageId === id).map((request) => request.at))
-        .toEqual([0, 400, 800]);
+        .toEqual([0, REFRESH, REFRESH * 2]);
     }
     expect(vi.getTimerCount()).toBe(0);
   });
@@ -186,7 +189,7 @@ describe('SubagentFlowPresenter', () => {
       f.presenter.update(snapshot('slow', { timeline: thinking(`send ${step}`) }));
     }
     f.presenter.update(snapshot('fast', { status: 'completed' }));
-    await vi.advanceTimersByTimeAsync(1200);
+    await vi.advanceTimersByTimeAsync(REFRESH + 200);
     expect(f.adapter.send).toHaveBeenCalledTimes(2);
     expect(f.adapter.editMessage).toHaveBeenCalledTimes(1);
     expect(vi.getTimerCount()).toBe(0);
@@ -199,7 +202,7 @@ describe('SubagentFlowPresenter', () => {
     }
     f.presenter.update(snapshot('slow', { status: 'completed', timeline: thinking('FINAL') }));
     f.presenter.update(snapshot('slow', { timeline: thinking('LATE RUNNING') }));
-    await vi.advanceTimersByTimeAsync(1200);
+    await vi.advanceTimersByTimeAsync(REFRESH + 200);
     expect(f.adapter.editMessage).toHaveBeenCalledTimes(2);
     const finished = f.presenter.finish();
     editGate.resolve();
@@ -227,7 +230,7 @@ describe('SubagentFlowPresenter', () => {
     f.presenter.update(pending);
     pending.timeline[0].toolResult = 'mutated result';
     pending.timeline[0].inputData!.nested = { value: 'mutated pending' };
-    await vi.advanceTimersByTimeAsync(400);
+    await vi.advanceTimersByTimeAsync(REFRESH);
     await f.presenter.finish();
     expect(f.data[0].timeline?.[0]).toMatchObject({ toolName: 'Edit', inputData: { nested: { value: 'original' } } });
     expect(f.data[1].timeline?.[0]).toMatchObject({ toolResult: 'ok', inputData: { nested: { value: 'pending original' } } });
@@ -264,7 +267,7 @@ describe('SubagentFlowPresenter', () => {
     expect(f.data[0].toolLogs?.every((entry) => entry.toolId?.startsWith(f.data[0].turnId!))).toBe(true);
     const register = vi.spyOn(f.details, 'registerThinking');
     f.presenter.update(snapshot('child', { status: 'completed', timeline: thinking(full) }));
-    await vi.advanceTimersByTimeAsync(400);
+    await vi.advanceTimersByTimeAsync(REFRESH);
     await f.presenter.finish();
     expect(register).toHaveBeenCalledWith('chat', expect.objectContaining({ text: full }));
     expect(f.adapter.send).toHaveBeenCalledOnce();
@@ -276,7 +279,7 @@ describe('SubagentFlowPresenter', () => {
     expect(f.data[0]).toMatchObject({ renderedText: '', thinkingText: '', timeline: [], taskSummary: 'Task child' });
     await settle();
     f.presenter.update(snapshot('child', { timeline: thinking('real thought') }));
-    await vi.advanceTimersByTimeAsync(400);
+    await vi.advanceTimersByTimeAsync(REFRESH);
     expect(f.data[1].renderedText).toBe('');
     expect(f.data[1].timeline?.map((entry) => entry.kind)).toEqual(['thinking']);
   });
@@ -290,7 +293,7 @@ describe('SubagentFlowPresenter', () => {
     f.presenter.update(snapshot('child', { timeline: thinking('late') }));
     expect(f.data).toHaveLength(1);
     f.presenter.update(snapshot('child', { status: 'completed' }));
-    await vi.advanceTimersByTimeAsync(400);
+    await vi.advanceTimersByTimeAsync(REFRESH);
     await f.presenter.finish();
     expect(f.data.at(-1)).toMatchObject({ phase: 'failed', errorMessage: 'Original failure' });
     expect(JSON.stringify(f.messages.get('child-card-1'))).toContain('Original failure');
@@ -349,7 +352,7 @@ describe('SubagentFlowPresenter', () => {
     expect(f.onError).toHaveBeenCalledOnce();
     f.presenter.update(snapshot('child', { status: 'completed', timeline: [{ kind: 'text', blockId: 'answer', text: 'final answer' }] }));
     const finished = f.presenter.finish();
-    await vi.advanceTimersByTimeAsync(400);
+    await vi.advanceTimersByTimeAsync(REFRESH);
     await finished;
     expect(f.adapter.send).toHaveBeenCalledTimes(2);
     expect(new Set(f.adapter.send.mock.calls.map(([message]) => message.deliveryId)).size).toBe(1);
@@ -367,7 +370,7 @@ describe('SubagentFlowPresenter', () => {
     await settle();
     f.presenter.update(snapshot('child', { status: 'completed' }));
     const finished = f.presenter.finish();
-    await vi.advanceTimersByTimeAsync(400);
+    await vi.advanceTimersByTimeAsync(REFRESH);
     await finished;
     expect(f.adapter.send).toHaveBeenCalledTimes(2);
     expect(f.adapter.send.mock.calls[0][0].deliveryId).toBe(f.adapter.send.mock.calls[1][0].deliveryId);
@@ -383,7 +386,7 @@ describe('SubagentFlowPresenter', () => {
     f.presenter.update(snapshot('child', { status: 'completed' }));
     const finished = f.presenter.finish();
     const assertion = expect(finished).rejects.toMatchObject({ errors: [failure] });
-    await vi.advanceTimersByTimeAsync(400);
+    await vi.advanceTimersByTimeAsync(REFRESH);
     await assertion;
     expect(f.onError).toHaveBeenCalledWith(failure);
     expect(f.adapter.send).toHaveBeenCalledOnce();
@@ -398,7 +401,7 @@ describe('SubagentFlowPresenter', () => {
     f.presenter.update(snapshot('child', { status: 'failed', error: 'provider failure' }));
     const finished = f.presenter.finish();
     const assertion = expect(finished).rejects.toMatchObject({ errors: [failure] });
-    await vi.advanceTimersByTimeAsync(800);
+    await vi.advanceTimersByTimeAsync(REFRESH * 3);
     await assertion;
     expect(f.adapter.send).toHaveBeenCalledTimes(3);
     expect(f.onError).toHaveBeenCalledTimes(3);
@@ -430,7 +433,7 @@ describe('SubagentFlowPresenter', () => {
     expect(f.presenter.finish(interrupted)).toBe(finished);
     let done = false;
     void finished.then(() => { done = true; });
-    await vi.advanceTimersByTimeAsync(399);
+    await vi.advanceTimersByTimeAsync(REFRESH - 1);
     expect(done).toBe(false);
     await vi.advanceTimersByTimeAsync(1);
     await finished;
@@ -497,7 +500,7 @@ describe('SubagentFlowPresenter', () => {
     expect(f.presenter.dispose()).toBe(disposed);
     await disposed;
     expect(vi.getTimerCount()).toBe(0);
-    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(REFRESH * 2);
     f.presenter.update(snapshot('new'));
     await f.presenter.finish();
     expect(f.adapter.send).toHaveBeenCalledTimes(2);
