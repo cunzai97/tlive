@@ -7,6 +7,7 @@ import type { Button } from '../ui/types.js';
 import type { AgentProviderKind } from '../providers/kinds.js';
 import type { ActionCallbackRoute } from '../core/callbacks.js';
 import type { AgentProviderRuntimeMode } from '../providers/types.js';
+import type { StepUsage } from '../canonical/schema.js';
 import type { PlanTodo } from '../canonical/plan-signature.js';
 
 export interface ChannelInfo {
@@ -409,6 +410,8 @@ export interface ProgressData {
     detailId?: string;
     /** Exact count from the provider tokenizer, when available. */
     tokenCount?: number;
+    /** Cost of the model round-trip that emitted this call, when the provider reports it. */
+    usage?: StepUsage;
     isError?: boolean;
   }>;
   /** Completed Feishu flow: keep only trace panels in the progress bubble. */

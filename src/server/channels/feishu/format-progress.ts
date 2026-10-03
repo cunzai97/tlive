@@ -2,6 +2,7 @@
 import type { Locale } from '../../../shared/i18n/index.js';
 import { t } from '../../../shared/i18n/index.js';
 import type { ProgressData } from '../../../shared/formatting/message-types.js';
+import type { StepUsage } from '../../../shared/canonical/schema.js';
 import { truncate } from '../../../shared/core/string.js';
 import { shortPath } from '../../../shared/core/path.js';
 import { TODO_MARKERS } from '../../../shared/canonical/plan-signature.js';
@@ -20,6 +21,7 @@ import {
   isFlowTerminal,
   type FlowOptions,
   type FlowTextBlock,
+  type FlowToolBlock,
   type FlowBlock,
 } from './flow-blocks.js';
 import {
@@ -133,21 +135,42 @@ function textElements(
   }];
 }
 
+/** One group row, one line: 3.2k reads narrower than 3,200 and 64k than 64.0k. */
+function tokenCount(tokens: number): string {
+  if (tokens < 1000) return String(tokens);
+  const thousands = tokens / 1000;
+  return `${Number(thousands.toFixed(thousands < 100 ? 1 : 0))}k`;
+}
+
+/**
+ * Cost of the round-trips behind a group. Parallel calls share one round-trip, so each step counts
+ * once; context is cumulative rather than additive, so the newest step wins over the sum.
+ */
+function stepUsageSuffix(tools: readonly FlowToolBlock[]): string {
+  const steps = new Map<number, StepUsage>();
+  for (const tool of tools) if (tool.usage) steps.set(tool.usage.step, tool.usage);
+  if (!steps.size) return '';
+  let input = 0;
+  let output = 0;
+  let context = 0;
+  let window = 0;
+  for (const usage of steps.values()) {
+    input += usage.inputTokens;
+    output += usage.outputTokens;
+    context = Math.max(context, usage.contextTokens);
+    window = usage.contextWindow ?? window;
+  }
+  // A rounding-to-zero group still used context; 0% would read as "nothing loaded".
+  const percent = window > 0 ? ` ${Math.max(1, Math.round((context / window) * 100))}%` : '';
+  return ` ↓${tokenCount(input)} ↑${tokenCount(output)} ${tokenCount(context)}${percent}`;
+}
+
 export function buildProgressTimelineElements(params: FormatProgressParams): FeishuCardElement[] {
   if (params.flowOptions?.mode === 'legacy') return buildLegacyTimelineElements(params);
   const registry = params.flowOptions?.registry ?? createDefaultToolDisplayRegistry();
   const blocks = buildFlowBlocks(params.data, { ...params.flowOptions, registry });
   const views = thinkingViews(blocks, params);
   const elements: FeishuCardElement[] = [];
-  const categoryNames =
-    params.locale === 'zh'
-      ? { exploration: '探索工具', execution: '运行工具', editing: '编辑工具', generic: '通用工具' }
-      : {
-          exploration: 'Explore tools',
-          execution: 'Run tools',
-          editing: 'Edit tools',
-          generic: 'Tools',
-        };
   for (const block of blocks) {
     if (block.kind !== 'tool_group') {
       elements.push(...textElements(block, params, views));
@@ -174,9 +197,10 @@ export function buildProgressTimelineElements(params: FormatProgressParams): Fei
           ? 'running'
           : 'completed';
     const names = [...new Set(tools.map((tool) => tool.toolName))].join(' / ');
+    const count = tools.length > 1 ? ` (${tools.length})` : '';
     elements.push({
       ...collapsiblePanel(
-        `${flowStatusLabel(status, params.locale)} · ${categoryNames[block.category]} (${tools.length}) · ${names}`,
+        `${flowStatusLabel(status, params.locale)} · ${names}${count}${stepUsageSuffix(tools)}`,
         children,
         { expanded: block.expanded },
       ),

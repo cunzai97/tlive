@@ -195,6 +195,7 @@ export class PiLiveSession implements LiveSession {
         sessionId: this.sdkSessionId,
         model: this._runtimeInfo.model,
         reasoningEffort: this._runtimeInfo.reasoningEffort,
+        contextWindow: session.model?.contextWindow,
       });
       this.enqueueTurnEvent(context, {
         kind: 'status',
@@ -303,6 +304,7 @@ export class PiLiveSession implements LiveSession {
       sessionId: this.sdkSessionId,
       model: this._runtimeInfo.model,
       reasoningEffort: this._runtimeInfo.reasoningEffort,
+      contextWindow: session.model?.contextWindow,
     });
     this.enqueueTurnEvent(context, {
       kind: 'status',

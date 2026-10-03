@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { CanonicalEvent } from '../../shared/canonical/schema.js';
 import { PiAdapter } from '../../client/providers/pi-adapter.js';
 
 describe('PiAdapter', () => {
@@ -254,3 +255,54 @@ function assistantUsage(input: number, output: number, cacheRead: number): unkno
     },
   };
 }
+
+describe('PiAdapter step usage', () => {
+  const assistant = (usage: Record<string, unknown>, stopReason = 'toolUse') => ({
+    type: 'message_end',
+    message: { role: 'assistant', stopReason, content: [], usage },
+  } as any);
+
+  const started = (adapter: PiAdapter, id: string) =>
+    adapter.mapEvent({
+      type: 'tool_execution_start',
+      toolCallId: id,
+      toolName: 'bash',
+      args: {},
+    } as any)[0] as Extract<CanonicalEvent, { kind: 'tool_start' }>;
+
+  it('attributes the round-trip that produced the call, excluding cached reads', () => {
+    const adapter = new PiAdapter({ sessionId: 'pi-session' });
+    adapter.updateRuntime({ contextWindow: 128000 });
+    adapter.mapEvent(assistant({ input: 3000, output: 200, cacheRead: 55000, cacheWrite: 200, totalTokens: 0 }));
+
+    expect(started(adapter, 'call-1')).toMatchObject({
+      usage: { step: 1, inputTokens: 3200, outputTokens: 200, contextTokens: 58400, contextWindow: 128000 },
+    });
+    // Parallel calls share one round-trip: the same step number is what lets the card dedupe.
+    expect(started(adapter, 'call-2')).toMatchObject({ usage: { step: 1, contextTokens: 58400 } });
+  });
+
+  it('numbers a later round-trip separately and prefers the provider total', () => {
+    const adapter = new PiAdapter({ sessionId: 'pi-session' });
+    adapter.mapEvent(assistant({ input: 10, output: 4, cacheRead: 0, cacheWrite: 0, totalTokens: 999 }));
+    expect(started(adapter, 'call-1')).toMatchObject({ usage: { step: 1, contextTokens: 999 } });
+    adapter.mapEvent(assistant({ input: 20, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 0 }));
+    expect(started(adapter, 'call-2')).toMatchObject({ usage: { step: 2, inputTokens: 20, contextTokens: 25 } });
+  });
+
+  it('carries no usage until a complete round-trip exists', () => {
+    const adapter = new PiAdapter({ sessionId: 'pi-session' });
+    expect(started(adapter, 'call-1')).not.toHaveProperty('usage');
+    // An aborted or empty message has partial numbers, so nothing is attributed from it.
+    adapter.mapEvent(assistant({ input: 5000, output: 9, cacheRead: 0, cacheWrite: 0, totalTokens: 0 }, 'aborted'));
+    adapter.mapEvent(assistant({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 }));
+    expect(started(adapter, 'call-2')).not.toHaveProperty('usage');
+  });
+
+  it('omits the window when the model never reported one', () => {
+    const adapter = new PiAdapter({ sessionId: 'pi-session' });
+    adapter.mapEvent(assistant({ input: 10, output: 4, cacheRead: 0, cacheWrite: 0, totalTokens: 14 }));
+    expect(started(adapter, 'call-1')).toMatchObject({ usage: { step: 1, contextTokens: 14 } });
+    expect(started(adapter, 'call-1').usage).not.toHaveProperty('contextWindow');
+  });
+});

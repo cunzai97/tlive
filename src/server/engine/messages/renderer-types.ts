@@ -2,7 +2,7 @@
  * Shared types for message rendering — extracted to avoid circular dependency.
  */
 
-import type { CanonicalEvent, TodoStatus } from '../../../shared/canonical/schema.js';
+import type { CanonicalEvent, StepUsage, TodoStatus } from '../../../shared/canonical/schema.js';
 import type { LiveWriteProgress } from '../../../shared/formatting/message-types.js';
 
 /** Tool call log entry for detailed display */
@@ -34,6 +34,8 @@ export interface TimelineEntry {
   detailId?: string;
   /** Exact count supplied by the active provider tokenizer, when available. */
   tokenCount?: number;
+  /** Cost of the model round-trip that emitted this call, when the provider reports it. */
+  usage?: StepUsage;
   isError?: boolean;
 }
 

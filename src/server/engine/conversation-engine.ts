@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { extname, join } from 'node:path';
-import type { CanonicalEvent, TodoStatus } from '../../shared/canonical/schema.js';
+import type { CanonicalEvent, StepUsage, TodoStatus } from '../../shared/canonical/schema.js';
 import type { AgentSettingSource } from '../../shared/config.js';
 import { getTliveHome } from '../../shared/core/path.js';
 import type {
@@ -160,7 +160,12 @@ interface ProcessMessageParams {
   text: string;
   attachments?: FileAttachment[];
   onTextDelta?: (delta: string) => void;
-  onToolStart?: (event: { id: string; name: string; input: Record<string, unknown> }) => void | Promise<void>;
+  onToolStart?: (event: {
+    id: string;
+    name: string;
+    input: Record<string, unknown>;
+    usage?: StepUsage;
+  }) => void | Promise<void>;
   onToolResult?: (event: {
     toolUseId: string;
     content: string;

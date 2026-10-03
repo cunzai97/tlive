@@ -188,7 +188,7 @@ export class QueryTurnRunner {
           if (startedPresentationTools.has(event.id)) return;
           startedPresentationTools.add(event.id);
           if (!finishedPresentationTools.has(event.id)) runningPresentationTools.add(event.id);
-          renderer.onToolStart(event.name, event.input, event.id);
+          renderer.onToolStart(event.name, event.input, event.id, event.usage);
           // Ensure delegation appears before its first physical child cards.
           if (subagents && event.name === 'subagent') {
             try { await renderer.flushProgress(); }

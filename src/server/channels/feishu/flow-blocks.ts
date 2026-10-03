@@ -1,3 +1,4 @@
+import type { StepUsage } from '../../../shared/canonical/schema.js';
 import type { ProgressData } from '../../../shared/formatting/message-types.js';
 import { parsePlanFromToolCall } from '../../../shared/canonical/plan-signature.js';
 import {
@@ -49,6 +50,8 @@ export interface FlowTextBlock {
 export interface FlowToolBlock extends ToolDisplayCall {
   kind: 'tool';
   category: ToolDisplayCategory;
+  /** Cost of the model round-trip that emitted this call, when the provider reports it. */
+  usage?: StepUsage;
 }
 
 export interface FlowToolGroup {
@@ -153,6 +156,7 @@ export function collectFlowItems(
         if (entry.inputData !== undefined) existing.inputData = entry.inputData;
         if (entry.toolResult !== undefined) existing.toolResult = entry.toolResult;
         if (entry.detailId !== undefined) existing.detailId = entry.detailId;
+        if (entry.usage !== undefined) existing.usage = entry.usage;
         // A plan grows in place: the last complete payload wins, partial ones keep the old.
         if (inputChanged) {
           const plan = parsePlanFromToolCall(existing.inputData, existing.toolInput);
@@ -172,6 +176,7 @@ export function collectFlowItems(
         toolResult: entry.toolResult,
         status,
         detailId: entry.detailId,
+        usage: entry.usage,
         category: registry.category(entry.toolName ?? ''),
         plan: parsePlanFromToolCall(entry.inputData, entry.toolInput),
       };

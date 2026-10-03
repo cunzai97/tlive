@@ -48,6 +48,22 @@ describe('message-schema', () => {
     expect(canonicalEventSchema.parse({ ...streamingWrite, someFutureKey: 'x' })).toEqual(streamingWrite);
   });
 
+  it('treats a per-call usage block as optional in both directions', () => {
+    const withUsage = {
+      kind: 'tool_start',
+      id: 'tu_1',
+      name: 'bash',
+      input: { command: 'ls' },
+      usage: { step: 1, inputTokens: 3200, outputTokens: 326, contextTokens: 64000, contextWindow: 128000 },
+    };
+    expect(canonicalEventSchema.parse(withUsage)).toEqual(withUsage);
+    // An older bridge never declared usage: it strips the key instead of closing the socket.
+    expect(canonicalEventSchema.parse({ ...withUsage, someFutureKey: 'x' })).toEqual(withUsage);
+    // An older worker sends the call alone, which still means "no usage is known".
+    const withoutUsage = canonicalEventSchema.parse({ ...withUsage, usage: undefined });
+    expect((withoutUsage as { usage?: unknown }).usage).toBeUndefined();
+  });
+
   it('strips unknown fields at the canonical boundary', () => {
     const result = canonicalEventSchema.parse({ kind: 'text_delta', text: 'hi', futureField: 42 });
     expect((result as Record<string, unknown>).futureField).toBeUndefined();

@@ -466,7 +466,7 @@ describe('FeishuFormatter block-mode integration', () => {
       tool('Read', 'r1', { toolResult: undefined }), { kind: 'thinking', text: 'working' },
     ] }));
     const card = (msg.feishuElements ?? []) as FeishuCardElement[];
-    expect(card[0].header?.title.content).toContain('探索工具');
+    expect(card[0].header?.title.content).toContain('· Read');
     const outsideButtons = descendants(card.filter((item) => item.tag !== 'collapsible_panel')).filter((item) => item.tag === 'button');
     expect(outsideButtons).toContainEqual(expect.objectContaining({
       behaviors: [{ type: 'callback', value: { action: actionCallback('stop') } }],
@@ -483,7 +483,7 @@ describe('FeishuFormatter block-mode integration', () => {
     ] }));
     expect(countTokens).toHaveBeenCalledExactlyOnceWith('gap');
     const card = (msg.feishuElements ?? []) as FeishuCardElement[];
-    expect(card.filter((item) => item.header?.title.content.includes('探索工具'))).toHaveLength(2);
+    expect(card.filter((item) => item.header?.title.content.includes('· custom'))).toHaveLength(2);
     expect(JSON.stringify(msg.feishuElements)).not.toContain('c1 result');
   });
 });
@@ -557,5 +557,44 @@ describe('flow regression: provider counts, valid details and stable streaming i
     const before = calls(progress({ timeline: [call, call] })).map((entry) => entry.id);
     const after = calls(progress({ timeline: [call, { kind: 'thinking', text: 'short' }, call] })).map((entry) => entry.id);
     expect(after).toEqual(before);
+  });
+});
+
+describe('group title token usage', () => {
+  const step = (
+    stepId: number,
+    inputTokens: number,
+    outputTokens: number,
+    contextTokens: number,
+    contextWindow?: number,
+  ) => ({ step: stepId, inputTokens, outputTokens, contextTokens, ...(contextWindow ? { contextWindow } : {}) });
+
+  const title = (data: ProgressData) => elements(data)[0]?.header?.title.content ?? '';
+
+  it('names the call and its round-trip cost, with no category words', () => {
+    expect(title(progress({ timeline: [tool('bash', 'b1', { usage: step(1, 3200, 326, 64000, 80000) })] }))).toBe(
+      '✅ 完成 · bash ↓3.2k ↑326 64k 80%',
+    );
+  });
+
+  it('counts a parallel group once and reports the newest context, not the sum', () => {
+    // Only same-category calls fold together, so the group is three bash calls over two steps.
+    const card = title(progress({ timeline: [
+      tool('bash', 'b1', { usage: step(1, 3200, 326, 64000, 80000) }),
+      tool('bash', 'b2', { usage: step(1, 3200, 326, 64000, 80000) }),
+      tool('bash', 'b3', { usage: step(2, 1000, 40, 65000, 80000) }),
+    ] }));
+    expect(card).toBe('✅ 完成 · bash (3) ↓4.2k ↑366 65k 81%');
+  });
+
+  it('drops the percentage when the window is unknown and the whole suffix when no call has usage', () => {
+    expect(title(progress({ timeline: [tool('bash', 'b1', { usage: step(1, 900, 12, 1200) })] }))).toBe(
+      '✅ 完成 · bash ↓900 ↑12 1.2k',
+    );
+    expect(title(progress({ timeline: [tool('bash', 'b1')] }))).toBe('✅ 完成 · bash');
+  });
+
+  it('never rounds a used context down to zero', () => {
+    expect(title(progress({ timeline: [tool('bash', 'b1', { usage: step(1, 10, 2, 100, 200000) })] }))).toContain(' 1%');
   });
 });

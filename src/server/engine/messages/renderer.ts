@@ -4,6 +4,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import type { StepUsage } from '../../../shared/canonical/schema.js';
 import { redactSensitiveContent } from '../../../shared/utils/content-filter.js';
 import { truncate } from '../../../shared/core/string.js';
 import { parsePlanLike, parsePlanFromToolResult, type PlanTodo } from '../../../shared/canonical/plan-signature.js';
@@ -216,7 +217,12 @@ export class MessageRenderer {
     this.scheduleFlush();
   }
 
-  onToolStart(name: string, input?: Record<string, unknown>, toolUseId?: string): void {
+  onToolStart(
+    name: string,
+    input?: Record<string, unknown>,
+    toolUseId?: string,
+    usage?: StepUsage,
+  ): void {
     if (this.completed || this.errorMessage) return;
     // Shape decides before any name-based hiding: the same payload arrives as `todo` on pi and
     // as `TodoWrite` on Claude, and both have to feed the board.
@@ -255,6 +261,7 @@ export class MessageRenderer {
       toolId,
       inputData,
       status: 'running',
+      ...(usage ? { usage } : {}),
     });
     this.toolIdToTimelineIndex.set(toolId, tlIdx);
     this.lastTimelineIsText = false;

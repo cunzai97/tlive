@@ -579,4 +579,19 @@ describe('MessageRenderer', () => {
 
     renderer.dispose();
   });
+
+  it('keeps the round-trip cost on the timeline entry the card reads', async () => {
+    const renderer = createRenderer();
+    const usage = { step: 3, inputTokens: 3200, outputTokens: 326, contextTokens: 64000, contextWindow: 80000 };
+
+    renderer.onToolStart('bash', { command: 'ls' }, 'call-1', usage);
+    renderer.onToolStart('bash', { command: 'pwd' }, 'call-2');
+    await advance(500);
+
+    const timeline = flushCallback.mock.calls.at(-1)?.[3]?.timeline;
+    expect(timeline?.[0]).toEqual(expect.objectContaining({ kind: 'tool', toolName: 'bash', usage }));
+    expect(timeline?.[1]).not.toHaveProperty('usage');
+
+    renderer.dispose();
+  });
 });

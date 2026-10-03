@@ -1,4 +1,6 @@
 import type { AgentSessionEvent } from '@earendil-works/pi-coding-agent';
+import { calculateContextTokens } from '@earendil-works/pi-coding-agent';
+import type { StepUsage } from '../../shared/canonical/schema.js';
 import { type CanonicalEvent, canonicalEventSchema } from '../../shared/canonical/schema.js';
 import { PiSubagentMapper } from './pi-subagents.js';
 
@@ -6,17 +8,21 @@ interface PiAdapterState {
   sessionId?: string;
   model?: string;
   reasoningEffort?: string;
+  contextWindow?: number;
   startedTools: Set<string>;
   terminalEmitted: boolean;
   pendingMessages?: unknown[];
   /** When a streaming file was last snapshotted, per assistant content index. */
   liveWriteAt: Map<number, number>;
+  /** The round-trip whose tool calls are about to execute, numbered so a group counts it once. */
+  lastStepUsage?: StepUsage;
+  stepCount: number;
 }
 
 /** pi names its file writer `write`; the other spelling covers renamed providers. */
 const LIVE_WRITE_TOOLS = new Set(['write', 'Write']);
 const LIVE_WRITE_TAIL_CHARS = 4_000;
-/** The card repaints every 400ms, so a faster cadence would only be discarded downstream. */
+/** The card repaints on a fixed cadence, so a faster snapshot would only be discarded downstream. */
 const LIVE_WRITE_MIN_INTERVAL_MS = 300;
 
 export class PiAdapter {
@@ -25,18 +31,33 @@ export class PiAdapter {
     startedTools: new Set(),
     terminalEmitted: false,
     liveWriteAt: new Map(),
+    stepCount: 0,
   };
 
-  constructor(options: { sessionId?: string; model?: string; reasoningEffort?: string } = {}) {
+  constructor(
+    options: {
+      sessionId?: string;
+      model?: string;
+      reasoningEffort?: string;
+      contextWindow?: number;
+    } = {},
+  ) {
     this.state.sessionId = options.sessionId;
     this.state.model = options.model;
     this.state.reasoningEffort = options.reasoningEffort;
+    this.state.contextWindow = options.contextWindow;
   }
 
-  updateRuntime(options: { sessionId?: string; model?: string; reasoningEffort?: string }): void {
+  updateRuntime(options: {
+    sessionId?: string;
+    model?: string;
+    reasoningEffort?: string;
+    contextWindow?: number;
+  }): void {
     this.state.sessionId = options.sessionId ?? this.state.sessionId;
     this.state.model = options.model ?? this.state.model;
     this.state.reasoningEffort = options.reasoningEffort ?? this.state.reasoningEffort;
+    this.state.contextWindow = options.contextWindow ?? this.state.contextWindow;
   }
 
   mapEvent(event: AgentSessionEvent): CanonicalEvent[] {
@@ -46,12 +67,16 @@ export class PiAdapter {
       case 'message_update':
         this.mapAssistantUpdate(event.assistantMessageEvent, events);
         break;
+      case 'message_end':
+        this.rememberStepUsage(event.message);
+        break;
       case 'tool_execution_start':
         events.push({
           kind: 'tool_start',
           id: event.toolCallId,
           name: event.toolName,
           input: normalizeToolInput(event.args),
+          ...(this.state.lastStepUsage ? { usage: this.state.lastStepUsage } : {}),
         });
         this.state.startedTools.add(event.toolCallId);
         if (event.toolName === 'subagent') {
@@ -65,6 +90,7 @@ export class PiAdapter {
             id: event.toolCallId,
             name: event.toolName,
             input: normalizeToolInput(event.args),
+            ...(this.state.lastStepUsage ? { usage: this.state.lastStepUsage } : {}),
           });
           this.state.startedTools.add(event.toolCallId);
         }
@@ -86,6 +112,7 @@ export class PiAdapter {
             id: event.toolCallId,
             name: event.toolName,
             input: normalizeToolInput({}),
+            ...(this.state.lastStepUsage ? { usage: this.state.lastStepUsage } : {}),
           });
           this.state.startedTools.add(event.toolCallId);
         }
@@ -178,6 +205,32 @@ export class PiAdapter {
     } else if (event.type === 'toolcall_end') {
       this.mapLiveWrite(event.contentIndex, event.partial, true, events);
     }
+  }
+
+  /**
+   * pi reports usage per assistant message and executes that message's calls afterwards, so the
+   * round-trip behind a tool is already known when `tool_execution_start` arrives. An aborted or
+   * errored message carries partial numbers, so the previous complete step stays in force.
+   */
+  private rememberStepUsage(message: unknown): void {
+    const typed = message as
+      | { role?: unknown; stopReason?: unknown; usage?: Record<string, unknown> }
+      | undefined;
+    if (!typed || typed.role !== 'assistant' || !typed.usage) return;
+    if (typed.stopReason === 'aborted' || typed.stopReason === 'error') return;
+    const usage = typed.usage as unknown as Parameters<typeof calculateContextTokens>[0];
+    const contextTokens = calculateContextTokens(usage);
+    if (!contextTokens) return;
+    this.state.stepCount++;
+    const window = this.state.contextWindow;
+    this.state.lastStepUsage = {
+      step: this.state.stepCount,
+      // Cache reads are already paid for inside the prompt; cacheWrite is not, it is written now.
+      inputTokens: numberValue(usage.input) + numberValue(usage.cacheWrite),
+      outputTokens: numberValue(usage.output),
+      contextTokens,
+      ...(window && window > 0 ? { contextWindow: window } : {}),
+    };
   }
 
   /**

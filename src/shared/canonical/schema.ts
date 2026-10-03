@@ -10,11 +10,27 @@ const thinkingDeltaSchema = z.object({
   text: z.string(),
 });
 
+/**
+ * What one model round-trip cost. A provider reports this per assistant message, never per tool,
+ * so `step` names the round-trip: several parallel calls share one number and a folded group must
+ * count it once. `inputTokens` excludes cached reads. Optional on `tool_start` because providers
+ * that cannot attribute a call to a step omit it, and an older reader strips the key.
+ */
+export const stepUsageSchema = z.object({
+  step: z.number(),
+  inputTokens: z.number(),
+  outputTokens: z.number(),
+  contextTokens: z.number(),
+  contextWindow: z.number().positive().optional(),
+});
+export type StepUsage = z.infer<typeof stepUsageSchema>;
+
 const toolStartSchema = z.object({
   kind: z.literal('tool_start'),
   id: z.string(),
   name: z.string(),
   input: z.record(z.string(), z.unknown()),
+  usage: stepUsageSchema.optional(),
 });
 
 const toolResultSchema = z.object({
