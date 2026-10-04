@@ -25,7 +25,7 @@ export interface LoadPiProviderConfigOptions {
 }
 
 /** How much of the window to hold back by default, in percent. */
-export const DEFAULT_PI_COMPACT_RESERVE_PERCENT = 20;
+const DEFAULT_PI_COMPACT_RESERVE_PERCENT = 20;
 const MAX_PI_COMPACT_RESERVE_PERCENT = 50;
 
 export function loadPiProviderConfig(options: LoadPiProviderConfigOptions = {}): PiProviderConfig {
@@ -50,7 +50,7 @@ export function loadPiProviderConfig(options: LoadPiProviderConfigOptions = {}):
  * junk) disables the override and leaves the trigger at whatever
  * `~/.pi/agent/settings.json` asks for.
  */
-export function normalizePiCompactReservePercent(value: string | undefined): number {
+function normalizePiCompactReservePercent(value: string | undefined): number {
   if (value === undefined || value.trim() === '') return DEFAULT_PI_COMPACT_RESERVE_PERCENT;
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return 0;

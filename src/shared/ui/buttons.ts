@@ -44,7 +44,7 @@ function navHome(locale: Locale): Button {
   return quickButton(locale, 'home', { row: 0 });
 }
 
-export function navNew(locale: Locale): Button {
+function navNew(locale: Locale): Button {
   return quickButton(locale, 'new', { row: 1 });
 }
 
@@ -52,24 +52,6 @@ export interface NewSessionButtonProvider {
   kind: AgentProviderKind;
   displayName: string;
   isDefault?: boolean;
-}
-
-function navNewForProvider(
-  _locale: Locale,
-  provider: NewSessionButtonProvider,
-  row: number,
-): Button {
-  const label = t('btn.newProviderSession').replace('{provider}', provider.displayName);
-  return {
-    label,
-    callbackData: actionCallback('new', provider.kind),
-    style: provider.isDefault ? 'primary' : 'default',
-    row,
-  };
-}
-
-function navHelp(locale: Locale): Button {
-  return quickButton(locale, 'help', { row: 1 });
 }
 
 function navStop(_locale: Locale, sessionKey?: string): Button {
@@ -88,10 +70,6 @@ function navSettings(_locale: Locale): Button {
     style: 'default',
     row: 0,
   };
-}
-
-function navPerm(locale: Locale): Button {
-  return quickButton(locale, 'perm', { row: 0 });
 }
 
 function navQuick(locale: Locale, name: QuickButtonName, index: number): Button {
@@ -159,42 +137,6 @@ export function permissionButtons(permId: string, locale: Locale): Button[] {
     permAllowAllInSession(permId, locale),
     permDeny(permId, locale),
   ];
-}
-
-export function deferredSubmit(permId: string, _locale: Locale): Button {
-  return {
-    label: t('deferred.btnSubmit'),
-    callbackData: `${CALLBACK_PREFIXES.DEFERRED_SUBMIT}${permId}`,
-    style: 'primary',
-    row: 0,
-  };
-}
-
-export function deferredSkip(permId: string, _locale: Locale): Button {
-  return {
-    label: t('deferred.btnSkip'),
-    callbackData: `${CALLBACK_PREFIXES.DEFERRED_SKIP}${permId}`,
-    style: 'default',
-    row: 0,
-  };
-}
-
-export function newSessionButtons(
-  locale: Locale,
-  providers: readonly NewSessionButtonProvider[] = [],
-  row = 1,
-): Button[] {
-  if (providers.length === 0) {
-    return [{ ...navNew(locale), row }];
-  }
-  return providers.map((provider) => navNewForProvider(locale, provider, row));
-}
-
-export function homeButtons(
-  locale: Locale,
-  providers: readonly NewSessionButtonProvider[] = [],
-): Button[] {
-  return [navPerm(locale), ...newSessionButtons(locale, providers, 1), navHelp(locale)];
 }
 
 export function progressDoneButtons(

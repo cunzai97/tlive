@@ -328,7 +328,7 @@ function serializeEnvFile(env: Record<string, string>, source: string): string {
   return `${lines.join('\n')}\n`;
 }
 
-export function migrateLegacyConfigEnvFiles(tliveHome: string = getTliveHome()): void {
+function migrateLegacyConfigEnvFiles(tliveHome: string = getTliveHome()): void {
   const legacyPath = join(tliveHome, 'config.env');
   if (!existsSync(legacyPath)) return;
 
@@ -348,7 +348,7 @@ export function migrateLegacyConfigEnvFiles(tliveHome: string = getTliveHome()):
   }
 }
 
-export function loadConfigEnvFiles(profile: ConfigProfile): Record<string, string> {
+function loadConfigEnvFiles(profile: ConfigProfile): Record<string, string> {
   const tliveHome = getTliveHome();
   migrateLegacyConfigEnvFiles(tliveHome);
   return loadEnvFile(join(tliveHome, `${profile}.env`));

@@ -27,7 +27,6 @@ function createAdapter(channelType = 'feishu'): BaseChannelAdapter {
     editMessage: vi.fn().mockResolvedValue(undefined),
     sendTyping: vi.fn().mockResolvedValue(undefined),
     addReaction: vi.fn().mockResolvedValue(undefined),
-    createStreamingSession: vi.fn().mockReturnValue(null),
     getLifecycleReactions: vi.fn().mockReturnValue({
       processing: '🤔',
       done: '👍',
@@ -42,7 +41,6 @@ function createAdapter(channelType = 'feishu'): BaseChannelAdapter {
     ),
     shouldRenderProgressPhase: vi.fn().mockReturnValue(true),
     shouldSplitCompletedTrace: vi.fn().mockReturnValue(false),
-    shouldSplitProgressMessage: vi.fn().mockReturnValue(false),
     format: (msg: any) => feishuFormatter.format(msg),
     formatContent: (chatId: string, content: string, buttons?: any[]) =>
       feishuFormatter.formatContent(chatId, content, buttons),

@@ -35,7 +35,7 @@ const IMAGE_MIME_TYPES = new Set([
 
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg']);
 
-export const DEFAULT_MAX_FILE_DELIVERY_BYTES = 20 * 1024 * 1024;
+const DEFAULT_MAX_FILE_DELIVERY_BYTES = 20 * 1024 * 1024;
 
 export interface FileDeliveryTargetInput {
   channelType?: string;
@@ -335,7 +335,7 @@ function validateFileSize(size: number, maxFileSizeBytes: number): string | unde
   return `File too large (${actual}MB). Maximum is ${max}MB.`;
 }
 
-export function guessMimeType(fileName: string): string {
+function guessMimeType(fileName: string): string {
   return MIME_MAP[extname(fileName).toLowerCase()] || 'application/octet-stream';
 }
 

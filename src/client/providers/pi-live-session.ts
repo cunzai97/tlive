@@ -675,15 +675,11 @@ const PI_TUI_ONLY_COMMANDS = new Set([
   'quit',
 ]);
 
-export function piTuiOnlyCommandName(text: string): string | undefined {
+function piTuiOnlyCommandName(text: string): string | undefined {
   const match = /^\/([a-z0-9_-]+)/i.exec(text.trim());
   if (!match) return undefined;
   const name = match[1].toLowerCase();
   return PI_TUI_ONLY_COMMANDS.has(name) ? name : undefined;
-}
-
-export function piAgentDir(): string {
-  return process.env.PI_CODING_AGENT_DIR?.trim() || getAgentDir();
 }
 
 function resolvePiSessionPath(sessionId: string): string {

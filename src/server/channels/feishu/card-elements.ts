@@ -47,14 +47,6 @@ export function collapsiblePanel(
   };
 }
 
-export function markdownPanel(
-  title: string,
-  content: string,
-  options?: CollapsiblePanelOptions,
-): FeishuCardElement {
-  return collapsiblePanel(title, [markdownElement(content)], options);
-}
-
 export function formElement(
   name: string,
   elements: FeishuCardElement[],

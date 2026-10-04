@@ -20,7 +20,7 @@ export type {
   PermissionTimeoutCallback,
   QueryControls,
 };
-export { canonicalEffortSchema, type EffortLevel } from './effort.js';
+export type { EffortLevel } from './effort.js';
 export type { AgentProviderKind };
 
 export interface AgentProviderCapabilities {

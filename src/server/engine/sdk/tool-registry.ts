@@ -26,7 +26,7 @@ const SILENT_RESULT_TOOLS = new Set([
 ]);
 
 /** Max lines of tool output to show in preview */
-export const TOOL_RESULT_MAX_LINES = 3;
+const TOOL_RESULT_MAX_LINES = 3;
 
 export function getToolIcon(name: string): string {
   return TOOL_ICONS[name] ?? '🔧';

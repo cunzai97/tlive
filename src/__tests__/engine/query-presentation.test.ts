@@ -25,7 +25,6 @@ function createAdapter(): BaseChannelAdapter {
     editMessage: vi.fn().mockResolvedValue(undefined),
     addReaction: vi.fn().mockResolvedValue(undefined),
     shouldRenderProgressPhase: vi.fn().mockReturnValue(true),
-    shouldSplitProgressMessage: vi.fn().mockReturnValue(false),
     shouldSplitCompletedTrace: vi.fn().mockReturnValue(false),
     format: vi.fn().mockImplementation((msg) => formatter.format(msg)),
     formatContent: vi.fn().mockImplementation((chatId, content, buttons) =>

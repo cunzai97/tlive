@@ -4,7 +4,6 @@ import type {
   PinnedTopicMetadata,
   RenderedMessage,
   SendResult,
-  StreamingCardSession,
   ThreadStartResult,
 } from './types.js';
 import type {
@@ -75,27 +74,6 @@ export abstract class BaseChannelAdapter<TRendered extends RenderedMessage = Ren
     _text: string,
   ): Promise<string | null> {
     return null;
-  }
-
-  /** Native progress transport preference; renderer uses a shorter delta cadence. */
-  usesNativeProgressStreaming(): boolean {
-    return false;
-  }
-
-  /** Create a streaming card/message session when the platform supports it. */
-  createStreamingSession(
-    _chatId: string,
-    _receiveIdType?: string,
-    _replyToMessageId?: string,
-    _header?: { template: string; title: string },
-    _replyInThread?: boolean,
-  ): StreamingCardSession | null {
-    return null;
-  }
-
-  /** Whether a rendered progress message should be split into a new bubble on this platform. */
-  shouldSplitProgressMessage(_message: TRendered): boolean {
-    return false;
   }
 
   // --- Policy support ---

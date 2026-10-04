@@ -30,7 +30,6 @@ function mockAdapter(channelType = 'feishu'): BaseChannelAdapter {
       : decision === 'deny' ? '👎' : decision === 'allow_always' ? '👌' : '👍'),
     shouldRenderProgressPhase: vi.fn().mockReturnValue(true),
     shouldSplitCompletedTrace: vi.fn().mockImplementation(() => channelType === 'feishu'),
-    shouldSplitProgressMessage: vi.fn().mockReturnValue(false),
     getLocale: vi.fn().mockReturnValue('zh'),
     validateConfig: vi.fn().mockReturnValue(null),
     isAuthorized: vi.fn().mockReturnValue(true),

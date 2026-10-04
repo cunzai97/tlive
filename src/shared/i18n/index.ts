@@ -14,11 +14,6 @@ export function setGlobalLocale(locale: Locale): void {
   globalLocale = locale;
 }
 
-/** Get the current global locale */
-export function getGlobalLocale(): Locale {
-  return globalLocale;
-}
-
 /** Look up a translation by key (uses global locale, or override if provided) */
 export function t(key: TranslationKey, localeOverride?: Locale): string {
   const locale = localeOverride ?? globalLocale;

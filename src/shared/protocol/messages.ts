@@ -315,7 +315,7 @@ const turnStartSchema = z.object({
   attachments: z.array(fileAttachmentSchema).optional(),
 });
 
-export const remoteProtocolMessageSchema = z.discriminatedUnion('type', [
+const remoteProtocolMessageSchema = z.discriminatedUnion('type', [
   clientHelloSchema,
   serverHelloSchema,
   z.object({ type: z.literal('server.ping'), timestamp: z.number() }),

@@ -46,7 +46,7 @@ const IMAGE_EXT_BY_MIME: Record<string, string> = {
  * under a png-shaped key. Declaring the wrong type breaks native base64 delivery, so read
  * it off the bytes.
  */
-export function sniffImageMime(buf: Buffer): string | undefined {
+function sniffImageMime(buf: Buffer): string | undefined {
   if (buf.length >= 4 && buf.readUInt32BE(0) === 0x89504e47) return 'image/png';
   if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
   if (buf.length >= 4 && buf.toString('ascii', 0, 4) === 'GIF8') return 'image/gif';

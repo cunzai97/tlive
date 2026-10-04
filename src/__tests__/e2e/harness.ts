@@ -1,142 +1,17 @@
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { vi } from 'vitest';
 import type { CanonicalEvent } from '../../shared/canonical/schema.js';
-import { BaseChannelAdapter } from '../../server/channels/base.js';
-import { RateLimitError } from '../../server/channels/errors.js';
 import type {
-  InboundMessage,
-  SendResult,
-  StreamingCardSession,
-  ThreadStartResult,
-} from '../../server/channels/types.js';
-import { FeishuFormatter } from '../../server/channels/feishu/formatter.js';
-import { FEISHU_POLICY } from '../../server/channels/feishu/policy.js';
-import type { FeishuRenderedMessage } from '../../server/channels/feishu/types.js';
-import type { Config } from '../../shared/config.js';
-import { BridgeManager } from '../../server/engine/coordinators/bridge-manager.js';
-import type { LiveSession, MessagePriority, StreamChatResult, TurnParams } from '../../shared/providers/base.js';
-import type { ClaudeSDKProvider } from '../../client/providers/claude-sdk.js';
-import { JsonFileStore } from '../../server/store/json-file.js';
+  LiveSession,
+  MessagePriority,
+  StreamChatResult,
+  TurnParams,
+} from '../../shared/providers/base.js';
 
 type Scenario =
   | string
   | CanonicalEvent[]
   | AsyncIterable<CanonicalEvent>
   | ((prompt: string, params?: TurnParams) => Promise<CanonicalEvent[]> | CanonicalEvent[]);
-
-export interface SentMessage {
-  id: string;
-  message: FeishuRenderedMessage;
-}
-
-export class TestFeishuAdapter extends BaseChannelAdapter<FeishuRenderedMessage> {
-  readonly channelType = 'feishu' as const;
-  protected readonly policy = FEISHU_POLICY;
-  readonly sent: SentMessage[] = [];
-  readonly edits: Array<{ chatId: string; messageId: string; message: FeishuRenderedMessage }> = [];
-  readonly typing: string[] = [];
-  readonly reactions: Array<{ chatId: string; messageId: string; emoji: string }> = [];
-  private queue: InboundMessage[] = [];
-  private editRateLimitFailures = 0;
-  private nextMessageSeq = 1;
-
-  constructor(private readonly authorizedUsers = new Set(['user-1', 'service-user'])) {
-    super();
-    this.formatter = new FeishuFormatter('zh');
-  }
-
-  async start(): Promise<void> {}
-
-  async stop(): Promise<void> {}
-
-  async consumeOne(): Promise<InboundMessage | null> {
-    return this.queue.shift() ?? null;
-  }
-
-  push(message: Partial<InboundMessage> & Pick<InboundMessage, 'text'>): InboundMessage {
-    const full: InboundMessage = {
-      channelType: 'feishu',
-      chatId: 'chat-1',
-      userId: 'user-1',
-      messageId: `in-${this.nextMessageSeq++}`,
-      ...message,
-    };
-    this.queue.push(full);
-    return full;
-  }
-
-  inbound(message: Partial<InboundMessage> & Pick<InboundMessage, 'text'>): InboundMessage {
-    return {
-      channelType: 'feishu',
-      chatId: 'chat-1',
-      userId: 'user-1',
-      messageId: `in-${this.nextMessageSeq++}`,
-      ...message,
-    };
-  }
-
-  async send(message: FeishuRenderedMessage): Promise<SendResult> {
-    const id = `out-${this.nextMessageSeq++}`;
-    this.sent.push({ id, message });
-    return { messageId: id, success: true };
-  }
-
-  async editMessage(
-    chatId: string,
-    messageId: string,
-    message: FeishuRenderedMessage,
-  ): Promise<void> {
-    if (this.editRateLimitFailures > 0) {
-      this.editRateLimitFailures -= 1;
-      throw new RateLimitError('fake Feishu edit rate limit', 1);
-    }
-    this.edits.push({ chatId, messageId, message });
-    const existing = this.sent.find((entry) => entry.id === messageId);
-    if (existing) {
-      existing.message = message;
-    }
-  }
-
-  async sendTyping(chatId: string): Promise<void> {
-    this.typing.push(chatId);
-  }
-
-  validateConfig(): string | null {
-    return null;
-  }
-
-  isAuthorized(userId: string): boolean {
-    return this.authorizedUsers.has(userId);
-  }
-
-  async addReaction(chatId: string, messageId: string, emoji: string): Promise<void> {
-    this.reactions.push({ chatId, messageId, emoji });
-  }
-
-  async removeReaction(_chatId: string, _messageId: string): Promise<void> {}
-
-  async startThreadFromMessage(
-    _chatId: string,
-    messageId: string,
-    _text?: string,
-  ): Promise<ThreadStartResult | null> {
-    return {
-      threadId: `thread-${messageId}`,
-      rootMessageId: messageId,
-      messageId: `topic-${messageId}`,
-    };
-  }
-
-  createStreamingSession(): StreamingCardSession | null {
-    return null;
-  }
-
-  failNextEditWithRateLimit(times = 1): void {
-    this.editRateLimitFailures += times;
-  }
-}
 
 class FakeLiveSession implements LiveSession {
   isAlive = true;
@@ -233,36 +108,11 @@ export class FakeClaudeProvider {
   interruptCount = 0;
   readonly createSession = vi.fn((params: { workingDirectory: string; sessionId?: string }) => {
     void params;
-    return new FakeLiveSession(
-      this.scenario,
-      () => this.nextSessionId(),
-      (prompt) => {
-        this.prompts.push(prompt);
-      },
-      (text, priority) => {
-        this.priorityMessages.push({ text, priority });
-      },
-      () => {
-        this.interruptCount += 1;
-      },
-    );
+    return this.newSession();
   });
-  readonly streamChat = vi.fn((params: { prompt: string }) => {
-    const session = new FakeLiveSession(
-      this.scenario,
-      () => this.nextSessionId(),
-      (prompt) => {
-        this.prompts.push(prompt);
-      },
-      (text, priority) => {
-        this.priorityMessages.push({ text, priority });
-      },
-      () => {
-        this.interruptCount += 1;
-      },
-    );
-    return session.startTurn(params.prompt);
-  });
+  readonly streamChat = vi.fn((params: { prompt: string }) =>
+    this.newSession().startTurn(params.prompt),
+  );
   private sessionSeq = 1;
 
   constructor(private scenario: Scenario = 'Fake Claude response') {}
@@ -278,63 +128,22 @@ export class FakeClaudeProvider {
   private nextSessionId(): string {
     return `sdk-session-${this.sessionSeq++}`;
   }
-}
 
-export interface E2EHarness {
-  root: string;
-  store: JsonFileStore;
-  adapter: TestFeishuAdapter;
-  claude: FakeClaudeProvider;
-  manager: BridgeManager;
-  cleanup(): Promise<void>;
-}
-
-export function createE2EHarness(scenario?: Scenario): E2EHarness {
-  const root = mkdtempSync(join(tmpdir(), 'tlive-e2e-'));
-  const previousHome = process.env.TLIVE_HOME;
-  process.env.TLIVE_HOME = join(root, 'home');
-
-  const store = new JsonFileStore(join(root, 'store'));
-  const adapter = new TestFeishuAdapter();
-  const claude = new FakeClaudeProvider(scenario);
-  const config = testConfig(root);
-  const manager = new BridgeManager({
-    store,
-    llm: claude as unknown as ClaudeSDKProvider,
-    defaultWorkdir: root,
-    config,
-    getExecutionClients: () => [
-      {
-        clientId: 'local',
-        name: 'local',
-        online: true,
-        isDefault: true,
-        isLocal: true,
-        activeTurns: 0,
-        workspaces: [{ path: root, isDefault: true }],
-        providers: [{ kind: 'claude', displayName: 'Claude', available: true, isDefault: true }],
-        version: 'test',
+  private newSession(): FakeLiveSession {
+    return new FakeLiveSession(
+      this.scenario,
+      () => this.nextSessionId(),
+      (prompt) => {
+        this.prompts.push(prompt);
       },
-    ],
-  });
-  manager.registerAdapter(adapter);
-
-  return {
-    root,
-    store,
-    adapter,
-    claude,
-    manager,
-    cleanup: async () => {
-      await manager.stop();
-      if (previousHome === undefined) {
-        delete process.env.TLIVE_HOME;
-      } else {
-        process.env.TLIVE_HOME = previousHome;
-      }
-      rmSync(root, { recursive: true, force: true });
-    },
-  };
+      (text, priority) => {
+        this.priorityMessages.push({ text, priority });
+      },
+      () => {
+        this.interruptCount += 1;
+      },
+    );
+  }
 }
 
 export async function waitFor<T>(
@@ -348,72 +157,6 @@ export async function waitFor<T>(
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error('Timed out waiting for E2E condition');
-}
-
-export function allRenderedText(adapter: TestFeishuAdapter): string {
-  return [
-    ...adapter.sent.map((entry) => stringifyMessage(entry.message)),
-    ...adapter.edits.map((entry) => stringifyMessage(entry.message)),
-  ].join('\n');
-}
-
-export function findCallbackData(adapter: TestFeishuAdapter, prefix: string): string | undefined {
-  for (const entry of adapter.sent) {
-    const callback = findInObject(entry.message, prefix);
-    if (callback) return callback;
-  }
-  for (const entry of adapter.edits) {
-    const callback = findInObject(entry.message, prefix);
-    if (callback) return callback;
-  }
-  return undefined;
-}
-
-function testConfig(root: string): Config {
-  return {
-    token: 'test-token',
-    provider: 'claude',
-    locale: 'zh',
-    defaultWorkdir: root,
-    defaultModel: '',
-    agentSettingSources: ['user', 'project', 'local'],
-    mcp: {
-      enabled: false,
-      port: 8081,
-      path: '/mcp',
-      token: 'mcp-token',
-      maxFileSizeBytes: 20 * 1024 * 1024,
-    },
-    feishu: {
-      appId: 'cli_test_app',
-      appSecret: 'secret',
-      verificationToken: 'verify',
-      encryptKey: '',
-      allowedUsers: ['user-1', 'service-user'],
-      autoPinTopics: false,
-    },
-    ui: {
-      doneButtons: ['home'],
-    },
-    remote: {
-      server: {
-        port: 8787,
-        path: '/tlive',
-        token: 'remote-token',
-        heartbeatIntervalMs: 30_000,
-        clientTimeoutMs: 90_000,
-      },
-      client: {
-        serverUrl: 'ws://127.0.0.1:8787/tlive',
-        token: 'remote-token',
-        clientId: 'test-client',
-        name: 'test-client',
-        note: '',
-        workspaces: [root],
-        reconnectIntervalMs: 3000,
-      },
-    },
-  };
 }
 
 async function* resolveScenarioStream(
@@ -445,41 +188,4 @@ async function* resolveScenarioStream(
 
 function isAsyncIterable(value: unknown): value is AsyncIterable<CanonicalEvent> {
   return !!value && typeof value === 'object' && Symbol.asyncIterator in value;
-}
-
-function stringifyMessage(message: FeishuRenderedMessage): string {
-  return JSON.stringify(message);
-}
-
-function findInObject(value: unknown, prefix: string): string | undefined {
-  if (!value || typeof value !== 'object') return undefined;
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const found = findInObject(item, prefix);
-      if (found) return found;
-    }
-    return undefined;
-  }
-
-  if (
-    prefix === 'form:' &&
-    (value as { form_action_type?: unknown }).form_action_type === 'submit' &&
-    typeof (value as { name?: unknown }).name === 'string'
-  ) {
-    return `form:${(value as { name: string }).name}`;
-  }
-
-  for (const [key, nested] of Object.entries(value)) {
-    if (key === 'action' && typeof nested === 'string' && nested.startsWith(prefix)) {
-      return nested;
-    }
-    if (key === 'callbackData' && typeof nested === 'string' && nested.startsWith(prefix)) {
-      return nested;
-    }
-    if (typeof nested === 'object') {
-      const found = findInObject(nested, prefix);
-      if (found) return found;
-    }
-  }
-  return undefined;
 }
