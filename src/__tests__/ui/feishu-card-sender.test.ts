@@ -1,6 +1,7 @@
 import type { Client } from '@larksuiteoapi/node-sdk';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { classifyDefaultError } from '../../server/channels/errors.js';
+import { FEISHU_SNAPSHOT_PATCH_MIN_MS } from '../../shared/feishu-card-config.js';
 import {
   configureFeishuCardBudget,
   getFeishuCardBudget,
@@ -277,5 +278,33 @@ describe('Feishu sender final SDK card payloads', () => {
     expect(mock.create.mock.calls[0][0].data.uuid).toBe(mock.create.mock.calls[1][0].data.uuid);
     expect(measureFeishuCard(mock.create.mock.calls[1][0].data.content).requestBytes).toBeLessThan(measureFeishuCard(mock.create.mock.calls[0][0].data.content).requestBytes);
     assertRequestsFit(mock);
+  });
+
+  it('spaces snapshot edits of one physical card instead of dropping them', async () => {
+    const mock = sdk();
+    const frame = (text: string): FeishuRenderedMessage => ({ chatId: 'chat', text, feishuSnapshot: true });
+    const result = await send(mock, frame('第一帧'));
+
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const stamps: number[] = [];
+    mock.patch.mockImplementation(async (request: Request) => {
+      stamps.push(Date.now());
+      mock.remote.set(request.path!.message_id, request.data.content);
+      return { code: 0 };
+    });
+
+    const first = editFeishuMessage(mock.client, result.messageId, frame('第二帧'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(stamps).toEqual([0]);
+    await first;
+
+    const second = editFeishuMessage(mock.client, result.messageId, frame('第三帧'));
+    await vi.advanceTimersByTimeAsync(FEISHU_SNAPSHOT_PATCH_MIN_MS - 1);
+    expect(stamps.length).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await second;
+    expect(stamps).toEqual([0, FEISHU_SNAPSHOT_PATCH_MIN_MS]);
+    expect(markdowns(mock.remote.get(result.messageId)!).join()).toContain('第三帧');
   });
 });

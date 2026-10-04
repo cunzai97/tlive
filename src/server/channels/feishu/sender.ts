@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { FEISHU_SNAPSHOT_REFRESH_MS } from '../../../shared/feishu-card-config.js';
+import { FEISHU_SNAPSHOT_PATCH_MIN_MS } from '../../../shared/feishu-card-config.js';
 import {
   applyNativeCard,
   createNativeCardState,
@@ -221,11 +221,12 @@ async function patchCard(
 ): Promise<void> {
   assertFeishuCardBudget(content, budget);
   if (snapshotPage) {
-    // IM card updates are limited to 5 QPS for each physical message. Protect
-    // terminal/state transitions too, not only renderer text scheduling.
+    // Feishu answers a sustained one edit per second per card with 230020 "Update the single
+    // messages too frequently", so physical cards are edited at half the render cadence. This
+    // delays a request, never drops one, so terminal and state transitions still land.
     const delay = snapshotPage.lastSnapshotPatchAt === undefined
       ? 0
-      : Math.max(0, snapshotPage.lastSnapshotPatchAt + FEISHU_SNAPSHOT_REFRESH_MS - Date.now());
+      : Math.max(0, snapshotPage.lastSnapshotPatchAt + FEISHU_SNAPSHOT_PATCH_MIN_MS - Date.now());
     if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
     snapshotPage.lastSnapshotPatchAt = Date.now();
   }
@@ -246,8 +247,16 @@ async function deliverCards(
   const useNative =
     hasNativeCardApi(client) &&
     (!!message.feishuStreaming || state.pages.some((page) => !!page.native));
+  // A card edited in place needs the 2s floor whichever formatter produced it. A streaming-format
+  // message that lands here because the SDK has no CardKit API is edited exactly as often, so
+  // treating only feishuSnapshot as paced would let it hit 230020 "too frequently".
+  const pacedPatch = Boolean(message.feishuSnapshot || message.feishuStreaming);
   const prepared = useNative
-    ? prepareNativeCard(cardForMessage(message), message.feishuStreaming?.elementIds ?? [])
+    ? prepareNativeCard(
+        cardForMessage(message),
+        message.feishuStreaming?.elementIds ?? [],
+        client,
+      )
     : undefined;
   const originalCard = prepared?.card ?? cardForMessage(message);
   const streamIds = prepared?.streamElementIds ?? [];
@@ -332,7 +341,7 @@ async function deliverCards(
           if (page.plan?.content !== plan.content) {
             await patchCard(
               client, page.messageId, plan.content, plan.budget ?? state.budget,
-              message.feishuSnapshot ? page : undefined,
+              pacedPatch ? page : undefined,
             );
           }
         } else {
@@ -353,7 +362,7 @@ async function deliverCards(
           rememberDelivery(client, state);
           if (initial.content !== plan.content) {
             await patchCard(client, page.messageId, plan.content, plan.budget ?? state.budget,
-              message.feishuSnapshot ? page : undefined);
+              pacedPatch ? page : undefined);
           }
         }
         page.plan = plan;
@@ -592,17 +601,6 @@ function buildTopicMetadataPost(text: string): string {
 export async function pinFeishuMessage(client: Client | null, messageId: string): Promise<void> {
   if (!client) return;
   checkedFeishuResult(await client.im.pin.create({ data: { message_id: messageId } }));
-}
-
-export function shouldSplitFeishuProgressMessage(
-  message: FeishuRenderedMessage,
-  client?: Client,
-): boolean {
-  const card =
-    message.feishuStreaming && (!client || hasNativeCardApi(client))
-      ? prepareNativeCard(cardForMessage(message), message.feishuStreaming.elementIds).card
-      : cardForMessage(message);
-  return planFeishuCards(card, getFeishuCardBudget(client)).length > 1;
 }
 
 function buildStructuredCardForMessage(message: FeishuRenderedMessage): string {

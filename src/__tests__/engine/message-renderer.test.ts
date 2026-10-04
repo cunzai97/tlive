@@ -89,6 +89,49 @@ describe('MessageRenderer', () => {
       hasMessage: true, lastFlushAt: 0 }, 2000)).toBe(4000);
   });
 
+  it('escalates the penalty window while rejections keep landing inside it', () => {
+    const controller = new AdaptiveFlushController({ minMs: 1000, maxMs: 1000 });
+    const input = { fallbackMs: 1000, content: 'running', phase: 'executing', hasMessage: true };
+    const windows: number[] = [];
+    let now = 0;
+    for (let attempt = 0; attempt < 6; attempt++) {
+      controller.recordRateLimit(undefined, now);
+      windows.push(controller.nextDelay(input, now));
+      // A forced flush sneaks back in before the window closes, exactly like the 14 rejected
+      // retries of one real turn, and has to make the next penalty longer rather than equal.
+      now += 500;
+    }
+    expect(windows).toEqual([2000, 4000, 8000, 15000, 15000, 15000]);
+  });
+
+  it('keeps the penalty window in front of every short-circuit in nextDelay', () => {
+    const controller = new AdaptiveFlushController({ minMs: 800, maxMs: 4000 });
+    const input = {
+      fallbackMs: 400,
+      content: 'first frame',
+      phase: 'executing',
+      hasMessage: false,
+    };
+    controller.recordRateLimit(undefined, 1000);
+    // No confirmed message yet, and the permission phase both used to answer "flush now", which
+    // re-offered the rejected frame inside the window that the rejection itself just opened.
+    expect(controller.nextDelay(input, 1000)).toBe(2000);
+    expect(controller.nextDelay({ ...input, phase: 'waiting_permission' }, 1000)).toBe(2000);
+    expect(controller.nextDelay({ ...input, hasMessage: true }, 2800)).toBe(800);
+    expect(controller.nextDelay(input, 3000)).toBe(0);
+  });
+
+  it('restarts the escalation ladder after a frame gets through', () => {
+    const controller = new AdaptiveFlushController({ minMs: 1000, maxMs: 1000 });
+    controller.recordRateLimit(undefined, 0);
+    controller.recordRateLimit(undefined, 500);
+    expect(controller.remainingRateLimitMs(500)).toBe(4000);
+    controller.recordFlushLatency(120);
+    controller.recordRateLimit(undefined, 6000);
+    expect(controller.remainingRateLimitMs(6000)).toBe(2000);
+    expect(controller.remainingRateLimitMs(9000)).toBe(0);
+  });
+
   it('renders executing progress with accumulated visible tools and quiet-mode suppression', async () => {
     const r = createRenderer();
     r.onToolStart('Bash');
@@ -593,5 +636,121 @@ describe('MessageRenderer', () => {
     expect(timeline?.[1]).not.toHaveProperty('usage');
 
     renderer.dispose();
+  });
+
+  describe('card-edit frequency limit', () => {
+    const rejectedByFeishu = () =>
+      Object.assign(new Error('This operation triggers the frequency limit'), {
+        name: 'RateLimitError',
+        code: 230020,
+        retryable: true,
+        retryAfterMs: 0,
+      });
+
+    /** Feishu's production cadence: one snapshot per second, 2s base penalty. */
+    function createCadenceRenderer(
+      flush: ReturnType<typeof vi.fn>,
+      onFlushError = vi.fn(),
+    ) {
+      const renderer = new MessageRenderer({
+        platformLimit: 4096,
+        throttleMs: 1000,
+        verboseLevel: 1,
+        adaptiveFlush: {
+          baseMs: 1000, minMs: 1000, maxMs: 1000, anchorToLastFlush: true, rateLimitBackoffMs: 2000,
+        },
+        onFlushError,
+        flushCallback: flush as any,
+      });
+      return { renderer, onFlushError };
+    }
+
+    it('parks a rejected progress frame behind the penalty window', async () => {
+      const flush = vi.fn()
+        .mockImplementationOnce(() => Promise.resolve('msg-1'))
+        .mockImplementationOnce(() => Promise.reject(rejectedByFeishu()))
+        .mockImplementation(() => Promise.resolve());
+      const { renderer, onFlushError } = createCadenceRenderer(flush);
+
+      renderer.onToolStart('Bash');
+      await advance(1100);
+      expect(flush).toHaveBeenCalledTimes(1);
+
+      renderer.onToolStart('Read');
+      await advance(1100);
+      // One attempt only: the doomed immediate re-send is what froze the card for 56s.
+      expect(flush).toHaveBeenCalledTimes(2);
+      expect(onFlushError).not.toHaveBeenCalled();
+
+      await advance(1500);
+      expect(flush).toHaveBeenCalledTimes(2);
+      await advance(600);
+      expect(flush).toHaveBeenCalledTimes(3);
+      expect(onFlushError).not.toHaveBeenCalled();
+      renderer.dispose();
+    });
+
+    it('parks a rejected opening frame until the window closes', async () => {
+      // The native path sends the first frame as an IM create, so a rejected create leaves
+      // hasMessage false. That is exactly the input the hot loop used to hammer the API with.
+      const flush = vi.fn().mockImplementation(() => Promise.reject(rejectedByFeishu()));
+      const { renderer, onFlushError } = createCadenceRenderer(flush);
+
+      renderer.onToolStart('Bash');
+      await advance(1100);
+      expect(flush).toHaveBeenCalledTimes(1);
+
+      for (const step of [1000, 1000, 1000]) {
+        renderer.onTextDelta('still growing');
+        await advance(step);
+      }
+      // 2s penalty from the rejection, not one attempt per cadence tick.
+      expect(flush).toHaveBeenCalledTimes(2);
+      expect(onFlushError).not.toHaveBeenCalled();
+      renderer.dispose();
+    });
+
+    it('outlasts the penalty window to deliver the terminal frame', async () => {
+      const flush = vi.fn()
+        .mockImplementationOnce(() => Promise.resolve('msg-1'))
+        .mockImplementation(() => Promise.resolve());
+      const { renderer, onFlushError } = createCadenceRenderer(flush);
+
+      renderer.onToolStart('Bash');
+      await advance(1100);
+      expect(flush).toHaveBeenCalledTimes(1);
+
+      flush.mockImplementationOnce(() => Promise.reject(rejectedByFeishu()));
+      const completed = renderer.onComplete();
+      await advance(200);
+      expect(flush).toHaveBeenCalledTimes(2);
+
+      await advance(2000);
+      expect(flush).toHaveBeenCalledTimes(3);
+      expect(flush.mock.calls[2][0]).toBe(flush.mock.calls[1][0]);
+      await completed;
+      expect(renderer.messageId).toBe('msg-1');
+      expect(onFlushError).not.toHaveBeenCalled();
+      renderer.dispose();
+    });
+
+    it('tells the user once the terminal frame is rejected twice', async () => {
+      const flush = vi.fn()
+        .mockImplementationOnce(() => Promise.resolve('msg-1'))
+        .mockImplementation(() => Promise.reject(rejectedByFeishu()));
+      const { renderer, onFlushError } = createCadenceRenderer(flush);
+
+      renderer.onToolStart('Bash');
+      await advance(1100);
+      const completed = renderer.onComplete();
+      await advance(200);
+      expect(flush).toHaveBeenCalledTimes(2);
+      await advance(3500);
+      await completed;
+
+      expect(flush).toHaveBeenCalledTimes(3);
+      expect(onFlushError).toHaveBeenCalledTimes(1);
+      renderer.dispose();
+    });
   });
 });

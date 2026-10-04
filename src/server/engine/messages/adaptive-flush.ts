@@ -21,6 +21,8 @@ interface NextDelayInput {
 }
 
 const TEXT_RATE_WINDOW_MS = 2000;
+/** Repeated rejections must not ladder indefinitely: a card this stale is better redrawn late. */
+const MAX_RATE_LIMIT_BACKOFF_MS = 15_000;
 
 export class AdaptiveFlushController {
   private readonly baseMs: number;
@@ -36,6 +38,7 @@ export class AdaptiveFlushController {
   private textHistory: Array<{ at: number; chars: number }> = [];
   private lastLatencyMs = 0;
   private rateLimitedUntil = 0;
+  private rateLimitStreak = 0;
 
   constructor(options: AdaptiveFlushOptions = {}) {
     this.baseMs = options.baseMs ?? 800;
@@ -58,19 +61,35 @@ export class AdaptiveFlushController {
 
   recordFlushLatency(latencyMs: number): void {
     this.lastLatencyMs = Math.max(0, latencyMs);
+    // A delivered frame ended the incident: the next rejection starts the ladder over.
+    this.rateLimitStreak = 0;
   }
 
   recordRateLimit(retryAfterMs?: number, now = Date.now()): void {
-    const backoffMs = retryAfterMs && retryAfterMs > 0 ? retryAfterMs : this.rateLimitBackoffMs;
-    this.rateLimitedUntil = Math.max(this.rateLimitedUntil, now + backoffMs);
+    const requested = retryAfterMs && retryAfterMs > 0 ? retryAfterMs : this.rateLimitBackoffMs;
+    // Rejections inside an open penalty window extend it geometrically. A fixed retry after the
+    // same delay re-enters that window: Feishu rejected 14 of 14 such retries in one turn.
+    this.rateLimitStreak = this.rateLimitedUntil > now ? this.rateLimitStreak + 1 : 1;
+    const ladderMs = Math.min(
+      MAX_RATE_LIMIT_BACKOFF_MS,
+      this.rateLimitBackoffMs * 2 ** (this.rateLimitStreak - 1),
+    );
+    this.rateLimitedUntil = Math.max(this.rateLimitedUntil, now + Math.max(requested, ladderMs));
+  }
+
+  /** How much of the penalty window is still ahead; a terminal frame has to outlast all of it. */
+  remainingRateLimitMs(now = Date.now()): number {
+    return Math.max(0, this.rateLimitedUntil - now);
   }
 
   nextDelay(input: NextDelayInput, now = Date.now()): number {
-    if (!input.hasMessage) return 0;
-    if (input.phase === 'waiting_permission') return 0;
+    // The penalty window wins over every short-circuit below it. A rejected first frame leaves
+    // hasMessage false, and returning 0 there re-flushes immediately into the same open window.
     if (this.rateLimitedUntil > now) {
       return Math.max(this.minMs, this.rateLimitedUntil - now);
     }
+    if (!input.hasMessage) return 0;
+    if (input.phase === 'waiting_permission') return 0;
 
     let delay = Math.max(this.baseMs, input.fallbackMs);
     const bytes = Buffer.byteLength(input.content, 'utf8');

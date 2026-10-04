@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SubagentSnapshot } from '../../shared/canonical/schema.js';
+import { FEISHU_SNAPSHOT_PATCH_MIN_MS } from '../../shared/feishu-card-config.js';
 
 const sdk = vi.hoisted(() => ({
   handlers: new Map<string, (data: unknown) => unknown>(),
@@ -65,7 +66,10 @@ describe('real Feishu adapter/sender wiring for simultaneous compact child cards
     const finals = children.map(child => snapshot(child, true)); const original = JSON.stringify(finals);
     finals.forEach(value => presenter.update(value));
     const finished = presenter.finish();
-    await vi.advanceTimersByTimeAsync(2000); await finished;
+    // Fake time only moves here when the test says so, and the sender now parks a reduced-budget
+    // retry behind the card-edit floor, so pump past several floors instead of one fixed window.
+    for (let tick = 0; tick < 12; tick++) await vi.advanceTimersByTimeAsync(FEISHU_SNAPSHOT_PATCH_MIN_MS);
+    await finished;
     expect(remote.size).toBe(children.length);
     expect([...remote.keys()]).toEqual(identities);
     expect(sdk.reply).toHaveBeenCalledTimes(children.length);

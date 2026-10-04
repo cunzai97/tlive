@@ -62,7 +62,10 @@ export class QueryPresentationFactory {
       onMessageId,
     });
 
-    const fastSnapshots = adapter.channelType === 'feishu';
+    // Feishu is the only channel today (ChannelType is a single literal), so the cadence below is
+    // not a branch: Feishu types each push's appended tail on its own clock, which makes one page
+    // refresh per second enough for the animation; a faster cadence would only multiply entity ops.
+    const refreshMs = FEISHU_SNAPSHOT_REFRESH_MS;
     // Bind board ownership to trusted routing AND a session generation (/new rotates it).
     const planSession = binding.sessionId ?? binding.sdkSessionId;
     const planScope = planSession ? JSON.stringify([
@@ -73,20 +76,17 @@ export class QueryPresentationFactory {
       // FeishuSender owns the combined byte/table split and its message-id topology.
       // Supplying a predicate disables MessageRenderer's generic size-estimation fallback.
       shouldSplitState: () => false,
-      channelOwnsPagination: adapter.channelType === 'feishu',
+      channelOwnsPagination: true,
       platformLimit: FEISHU_MESSAGE_LIMIT,
-      throttleMs: fastSnapshots ? FEISHU_SNAPSHOT_REFRESH_MS : 300,
+      throttleMs: refreshMs,
       adaptiveFlush: {
-        // Feishu snapshots follow a fixed target cadence, not the animation pace.
-        baseMs: fastSnapshots ? FEISHU_SNAPSHOT_REFRESH_MS : 800,
-        minMs: fastSnapshots ? FEISHU_SNAPSHOT_REFRESH_MS : 800,
-        maxMs: fastSnapshots ? FEISHU_SNAPSHOT_REFRESH_MS : 4000,
-        anchorToLastFlush: fastSnapshots,
-        sizePenaltyStartBytes: 10 * 1024,
-        largeSizePenaltyStartBytes: 20 * 1024,
-        fastOutputCharsPerSec: 240,
-        veryFastOutputCharsPerSec: 480,
-        highLatencyMs: 600,
+        // A pinned band (base = min = max) is deliberate: it switches off the size/output-speed/
+        // latency penalties, because the card edits at its own pace anyway. Only the rate-limit
+        // ladder is allowed to stretch this.
+        baseMs: refreshMs,
+        minMs: refreshMs,
+        maxMs: refreshMs,
+        anchorToLastFlush: true,
         rateLimitBackoffMs: 2000,
       },
       cwd: binding.cwd || this.options.defaultWorkdir,

@@ -74,11 +74,13 @@ const SPLIT_TIMELINE_THRESHOLD = 18;
 /**
  * 单气泡内容大小阈值（字节数）。
  * 仅在没有 shouldSplitState adapter hook 时作为 fallback。
- * 有 adapter hook 时由 shouldSplitProgressMessage 检查实际卡片 JSON 大小。
+ * 有 adapter hook 时由 shouldSplitState(state) 检查实际卡片 JSON 大小。
  */
 const SPLIT_CONTENT_BYTES_THRESHOLD = 10 * 1024; // 10KB fallback 阈值
 const SPLIT_CONTENT_EXPANSION_FACTOR = 2.0; // JSON 膨胀系数
 const SPLIT_ESTIMATED_CARD_LIMIT = 20 * 1024; // 预估卡片上限 20KB
+/** Upper bound on how long turn finalization may wait out a card-edit penalty window. */
+const MAX_TERMINAL_FLUSH_WAIT_MS = 15_000;
 
 export class MessageRenderer {
   // State collection
@@ -718,23 +720,53 @@ export class MessageRenderer {
               ? 'waiting_permission'
               : 'executing';
         const contentPreview = content.slice(0, 100);
+        const giveUp = (error: unknown, label: string) => {
+          this.lastFlushError = error instanceof Error ? error : new Error(label);
+          console.error(`${label}:`, error);
+          this.onFlushError?.(error as Error, { phase, contentPreview });
+        };
+        const retryInPlace = async (waitMs: number) => {
+          await new Promise((r) => setTimeout(r, waitMs));
+          const retryStartedAt = Date.now();
+          result = await this.flushCallback(content, isEdit, flushButtons, state);
+          this.adaptiveFlush?.recordFlushLatency(Date.now() - retryStartedAt);
+          this.lastFlushError = undefined;
+        };
 
-        if (retryable) {
-          if (retryAfterMs) this.adaptiveFlush?.recordRateLimit(retryAfterMs);
-          await new Promise((r) => setTimeout(r, retryAfterMs ?? 1000));
+        if (!retryable) {
+          giveUp(err, '[renderer] Failed');
+        } else if (retryAfterMs === undefined) {
+          // A lost socket is not a frequency rejection, so keep the old immediate replay: reusing
+          // the create identity on the next tick is what stops a duplicate card being sent.
           try {
-            const retryStartedAt = Date.now();
-            result = await this.flushCallback(content, isEdit, flushButtons, state);
-            this.adaptiveFlush?.recordFlushLatency(Date.now() - retryStartedAt);
-          } catch (_retryErr) {
-            this.lastFlushError = _retryErr instanceof Error ? _retryErr : new Error('Progress update failed after retry');
-            console.error('[renderer] Failed after retry:', err);
-            this.onFlushError?.(err, { phase, contentPreview });
+            await retryInPlace(1000);
+          } catch (retryErr) {
+            giveUp(retryErr, '[renderer] Failed after retry');
           }
-        } else {
+        } else if (!this.completed && !this.errorMessage) {
+          // A running frame has a later flush coming, so park it behind the penalty window instead
+          // of re-sending on a fixed timer: Feishu rejected 14 of 14 such immediate retries.
           this.lastFlushError = err instanceof Error ? err : new Error('Progress update failed');
-          console.error('[renderer] Failed:', err);
-          this.onFlushError?.(err, { phase, contentPreview });
+          this.adaptiveFlush?.recordRateLimit(retryAfterMs);
+          this.forceFlush = true;
+          if (this.timer) {
+            clearTimeout(this.timer);
+            this.timer = null;
+          }
+          this.scheduleFlush();
+        } else {
+          // The terminal frame has no successor, so it waits the window out and must get through.
+          this.adaptiveFlush?.recordRateLimit(retryAfterMs);
+          const waitMs = Math.min(
+            MAX_TERMINAL_FLUSH_WAIT_MS,
+            this.adaptiveFlush?.remainingRateLimitMs() ?? retryAfterMs,
+          );
+          console.warn(`[renderer] Terminal flush rejected; retrying in ${waitMs}ms:`, err);
+          try {
+            await retryInPlace(waitMs);
+          } catch (retryErr) {
+            giveUp(retryErr, '[renderer] Failed after retry');
+          }
         }
       }
       if (typeof result === 'string') this._messageId = result;
@@ -809,21 +841,19 @@ export class MessageRenderer {
       this.bubbleToolCount >= SPLIT_TOOL_THRESHOLD ||
       this.bubbleTimelineCount >= SPLIT_TIMELINE_THRESHOLD;
 
-    // 基于实际卡片 JSON 字节数的 split（精确，优先使用）。
-    // 估算的文本字节数仅在没有 adapter hook 时作为 fallback。
+    // 基于实际卡片 JSON 大小的 split（精确，优先使用 adapter hook）。
     const content = this.contentBuilder.render(this.getRenderInput());
-    const contentBytes = Buffer.byteLength(content, 'utf8');
-    const estimatedCardBytes = contentBytes * SPLIT_CONTENT_EXPANSION_FACTOR;
-    const estimatedContentTooLarge =
-      contentBytes > SPLIT_CONTENT_BYTES_THRESHOLD ||
-      estimatedCardBytes > SPLIT_ESTIMATED_CARD_LIMIT;
-
     if (this.shouldSplitState) {
-      // 精确检查：用实际卡片 JSON 大小，避免过早分割
       const state = this.contentBuilder.getStateSnapshot(this.getRenderInput(), content);
       return defaultSplit || this.shouldSplitState(state);
     }
-    return defaultSplit || estimatedContentTooLarge;
+    // No adapter hook: the card JSON size can only be estimated from the rendered text bytes.
+    const contentBytes = Buffer.byteLength(content, 'utf8');
+    return (
+      defaultSplit ||
+      contentBytes > SPLIT_CONTENT_BYTES_THRESHOLD ||
+      contentBytes * SPLIT_CONTENT_EXPANSION_FACTOR > SPLIT_ESTIMATED_CARD_LIMIT
+    );
   }
 }
 
