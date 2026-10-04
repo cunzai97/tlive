@@ -102,6 +102,12 @@ function toast(type: 'success' | 'error', content: string): Record<string, unkno
   return { toast: { type, content } };
 }
 
+/** A rejection reaches the user only as a toast, so this line is the sole way to tell them apart. */
+function rejected(verb: string, reason: string, content: string): Record<string, unknown> {
+  console.warn(`[feishu] detail ${verb} rejected: ${reason}`);
+  return toast('error', content);
+}
+
 function parseAction(value: string): Action | undefined {
   const match = ACTION.exec(value);
   if (!match) return undefined;
@@ -499,28 +505,36 @@ export class FeishuToolDetails {
     if (!callback?.startsWith('flow_detail:')) return undefined;
     // Consume malformed detail callbacks too: they must never fall through to the model.
     const action = parseAction(callback);
-    if (!action) return toast('error', '无效的详情操作。');
-    if (!authorized) return toast('error', DENIED);
+    if (!action) return rejected('action', 'malformed-callback', '无效的详情操作。');
+    if (!authorized) return rejected(action.verb, 'unauthorized-operator', DENIED);
     this.prune();
     const snapshot = this.snapshots.get(action.id);
-    if (this.disposed || !snapshot || snapshot.expiresAt <= this.now())
-      return toast('error', EXPIRED);
-    if (!this.permitted(snapshot, message, action)) return toast('error', DENIED);
-    if (snapshot.pending >= this.maxPending) return toast('error', '详情正在处理，请稍后重试。');
+    if (this.disposed) return rejected(action.verb, 'disposed', EXPIRED);
+    if (!snapshot) return rejected(action.verb, 'unknown-snapshot', EXPIRED);
+    if (snapshot.expiresAt <= this.now()) return rejected(action.verb, 'expired-snapshot', EXPIRED);
+    const denial = this.permitDenial(snapshot, message, action);
+    if (denial) return rejected(action.verb, denial, DENIED);
+    if (snapshot.pending >= this.maxPending)
+      return rejected(action.verb, 'queue-full', '详情正在处理，请稍后重试。');
     snapshot.pending++;
     const work = snapshot.tail.then(async () => {
       // Revalidate after waiting: a previous queued close/reopen may change the target.
-      if (
-        this.disposed ||
-        this.snapshots.get(action.id) !== snapshot ||
-        snapshot.expiresAt <= this.now()
-      )
-        return toast('error', EXPIRED);
-      if (!this.permitted(snapshot, message, action)) return toast('error', DENIED);
+      if (this.disposed || this.snapshots.get(action.id) !== snapshot)
+        return rejected(action.verb, 'gone-after-queue', EXPIRED);
+      if (snapshot.expiresAt <= this.now())
+        return rejected(action.verb, 'expired-after-queue', EXPIRED);
+      const queued = this.permitDenial(snapshot, message, action);
+      if (queued) return rejected(action.verb, queued, DENIED);
       try {
         return await this.perform(snapshot, action, client);
-      } catch {
+      } catch (error) {
         // Never leak SDK payloads (which may include content, tokens, or unrelated IDs) in toasts.
+        const reason = redactSensitiveContent(
+          error instanceof Error ? error.message : String(error),
+        ).slice(0, 200);
+        console.warn(
+          `[feishu] detail ${action.verb} failed: ${this.classifyError(error).name}: ${reason}`,
+        );
         return toast(
           'error',
           action.verb === 'close'
@@ -549,23 +563,26 @@ export class FeishuToolDetails {
     this.retainedBytes = 0;
   }
 
-  private permitted(snapshot: Snapshot, message: InboundMessage, action: Action): boolean {
+  /** Why this callback may not drive this snapshot, or undefined when it may. Reasons are log-only. */
+  private permitDenial(
+    snapshot: Snapshot,
+    message: InboundMessage,
+    action: Action,
+  ): string | undefined {
     const scope = snapshot.scope;
-    if (
-      !scope ||
-      (snapshot.kind === 'tool' && !snapshot.pages) ||
-      message.channelType !== 'feishu' ||
-      message.chatId !== scope.chatId ||
-      (message.threadId !== undefined && message.threadId !== scope.threadId) ||
-      message.userId !== scope.ownerUserId ||
-      !message.messageId
-    )
-      return false;
+    if (!scope) return 'never-bound';
+    if (snapshot.kind === 'tool' && !snapshot.pages) return 'unpaginated';
+    if (message.channelType !== 'feishu') return 'foreign-channel';
+    if (message.chatId !== scope.chatId) return 'other-chat';
+    if (message.threadId !== undefined && message.threadId !== scope.threadId) return 'other-topic';
+    if (message.userId !== scope.ownerUserId) return 'other-owner';
+    if (!message.messageId) return 'sourceless-callback';
     // card.action.trigger documents chat/message IDs, but not thread_id. The exact
     // server-bound source/detail message anchors its topic when that field is absent.
     // An explicitly conflicting topic is still rejected above; never route from callback data.
-    if (action.verb === 'open') return snapshot.sources.has(message.messageId);
-    return message.messageId === snapshot.detail?.messageId;
+    if (action.verb === 'open')
+      return snapshot.sources.has(message.messageId) ? undefined : 'foreign-source-message';
+    return message.messageId === snapshot.detail?.messageId ? undefined : 'not-the-detail-message';
   }
 
   private async perform(
