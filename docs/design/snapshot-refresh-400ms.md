@@ -1,5 +1,7 @@
 # 无动画快照改为 400ms
 
+> 历史记录，**不是当前配置**。原生 CardKit 流式后来重新成为默认，推送节奏固定 1000ms，本文件的 400ms 节流与 `FEISHU_SNAPSHOT_REFRESH_MS=400` 均已失效，见 [card-native-streaming.md](card-native-streaming.md) 文末"当前状态与实测（2026-10-04）"。
+
 ## 目标和范围
 
 用户实际试用反馈 200ms 容易触发限流、导致更慢，因此将目标刷新间隔和每物理进度卡最小 patch 间隔统一改为 400ms。

@@ -1,6 +1,6 @@
 # 飞书原生流式恢复：设计与本地验证
 
-> 本文件记录历史 CardKit 打字动画版本。当前默认已按用户明确要求改为无动画的 200ms 最新快照刷新，见 [snapshot-refresh-200ms.md](snapshot-refresh-200ms.md)；下文原生默认开启的描述不再是当前默认配置。
+> **当前默认就是本文件描述的原生流式**：`TL_FS_NATIVE_STREAMING=true`，打印 `print_frequency_ms=10` + `print_step=4` + `print_strategy=delay`（算术值 400 字符/秒），页面推送固定 1000ms 一次。下文 70/1/fast 与"base/min=250、max=1200 调度"是首次试验的历史值，[snapshot-refresh-200ms.md](snapshot-refresh-200ms.md) / [snapshot-refresh-400ms.md](snapshot-refresh-400ms.md) 记录的"默认关闭动画"也已被推翻；当前状态与实测见文末。
 
 ## 范围和回退
 
@@ -14,7 +14,7 @@
 
 `QueryPresentationFactory → MessageRenderer → QueryExecutionPresenter → FeishuAdapter.send/edit → 共享 sender → CardKit`。
 
-不是仅修改没有被查询链路调用的 `createStreamingSession`。进度 formatter 提供语义思考/正文组件身份与当前是否允许流式；首页、详情、媒体等继续使用普通发送方式。
+不是仅修改早已删除的孤立会话 API（历史里的 `createStreamingSession`/`FeishuStreamingSession` 因零调用方已连同 `streaming.ts` 一起删除）。进度 formatter 提供语义思考/正文组件身份与当前是否允许流式；首页、详情、媒体等继续使用普通发送方式。
 
 ## 流式、预算与续卡
 
@@ -59,3 +59,13 @@
 - 新桥接显式设置 `TL_FS_CARD_FLOW=blocks`、`TL_FS_NATIVE_STREAMING=true`，继承原运行环境但剥离代理。读取新进程环境、路径、状态与日志验证运行结果，没有打印或落盘凭据。
 - systemd 两个 unit 保持 inactive，文件哈希和默认 CLI 内容/路径均未改变；旧工作区及构建保留作为回退。运行记录：`/home/pan/.tlive/runtime/card-native-streaming-trial.json`。
 - 子代理迟到复核针对旧基线；最终树的相关 6 文件 / 80 项回归已重新通过。新版本已运行，但手机逐字效果、手动折叠保持、真实续卡和详情仍待用户用新任务验收；重启清空旧详情快照。
+
+## 当前状态与实测（2026-10-04）
+
+- 打印参数：默认 10ms/4 字（400 字符/秒）、`delay`，可用 `TL_FS_NATIVE_PRINT_FREQ_MS` / `TL_FS_NATIVE_PRINT_STEP` / `TL_FS_NATIVE_PRINT_STRATEGY` 覆盖，取值 1..1000 且非法值启动即报错。
+- 平台不校验这两个数：真机探针里 `freq=1`、`freq=100000`、`step=999999` 全部 `code=0`，只有 `step=0` 和非法 strategy 报 `11311`。所以"多少毫秒一个字"只是算术值，真实节奏只能手机观察；官方文档抓取仍被 `FORBIDDEN 115` 限流。
+- 页面推送固定 1 次/秒（`FEISHU_SNAPSHOT_REFRESH_MS`），历史里的 400ms 原生节拍已删除。原因：每次推的是累计全文，客户端只对新增后缀打字，动画跑在自己的时钟上，提高推送频率不会让动画更快。
+- 允许落后：模型快于打印速率时卡片慢慢补字，不靠调大 step 或提高推送频率追平。
+- 思考正文按**整段**轮替（`thinkingSegments`，段预算 300 token）：已发布的段边界永不重切，只追加最新段、整段下线最旧段。早期实现切"最近 300 token 的滑动尾巴"，每拍都重写已打印前缀，观感就是整块消失再重打。物理组件 ID 由语义身份哈希（不是结构路径），否则短思考并入工具组时会改名导致重打。
+- 定高面板方案**已实测并否决**：`scripts/live-feishu-scroll-probe.js` 发过 A=300px / B=150px / C=无 三段的对照卡，`max_height` 服务端一律接受且真机上确实压住高度、自动跟随最新行；用户判定"会被吸附到最底下"观感不可接受，因此 `max_height` 没有进入实现，思考显示保持整段轮替。
+- fallback 地板：`nativeStreaming=true` 但 SDK 无 CardKit API 时按普通卡 patch，这条路径此前只有 `feishuSnapshot` 才享受 2000ms 编辑地板，现改为 `feishuSnapshot || feishuStreaming` 都受保护，避免每秒编辑撞 `230020`。
