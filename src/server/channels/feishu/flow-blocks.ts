@@ -94,7 +94,7 @@ export function isFlowTerminal(data: ProgressData): boolean {
 }
 
 /** Remove renderer-added footer/summary, never a text-size budget. */
-export function progressBodyWithoutMetadata(data: ProgressData): string {
+function progressBodyWithoutMetadata(data: ProgressData): string {
   let body = data.renderedText.trim();
   for (const suffix of [data.footerLine, data.toolSummary, '───────────────']) {
     if (suffix && body.endsWith(suffix)) body = body.slice(0, -suffix.length).trimEnd();

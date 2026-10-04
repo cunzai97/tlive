@@ -92,9 +92,12 @@ function nodes(value: unknown): Array<Record<string, unknown>> {
   return [value as Record<string, unknown>, ...Object.values(value).flatMap(nodes)];
 }
 
-/** The 300-token budget is about the thought, not the fence that turns it into a code block. */
+/** A thought body is plain markdown now; strip a fence if a payload still arrives wrapped in one. */
 const thoughtBody = (content: unknown): string =>
   /^(`{3,})\n([\s\S]*)\n\1$/u.exec(String(content))?.[2] ?? String(content);
+
+/** A thought only asks for its detail panel once part of it has left the card. */
+const LONG_THOUGHT = '完'.repeat(601);
 
 function detailAction(message: RenderedMessage): string {
   const action = nodes(message).map((node) => node.action)
@@ -451,7 +454,7 @@ describe('SubagentFlowPresenter', () => {
 
   it('uses inbound reply routing/ACL when threadId is missing, and does not trust snapshot metadata', async () => {
     const f = fixture({ inbound: { threadId: undefined, replyInThread: undefined } });
-    const child = Object.assign(snapshot('child', { status: 'completed', timeline: thinking('whole thought') }), {
+    const child = Object.assign(snapshot('child', { status: 'completed', timeline: thinking(LONG_THOUGHT) }), {
       turnId: 'attacker-turn', userId: 'attacker', threadId: 'wrong-topic', flowDetailUserId: 'attacker',
     });
     f.presenter.update(child);

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { countMarkdownTables, MAX_TABLES_PER_CARD } from './markdown.js';
+import { isTransientLeafKey } from './progress-identity.js';
 
 /** Soft limits apply to the final serialized card, not just its markdown. */
 export interface FeishuCardBudget {
@@ -344,7 +345,10 @@ function renderCard(
       if (node.expanded === true && later.has(key)) clone.expanded = false;
     }
     if (typeof node.element_id === 'string') {
-      const hash = createHash('sha256').update(key).digest('hex').slice(0, 12);
+      // Identity follows the semantic component, not the slot it happens to sit in. A short trailing
+      // thought joins the tool group once it grows, so a path-derived ID would rename the element mid
+      // stream: the client loses the printed text and retypes the whole block.
+      const hash = createHash('sha256').update(node.element_id).digest('hex').slice(0, 12);
       clone.element_id = `e${createHash('sha256').update(`${page}:${hash}`).digest('hex').slice(0, 19)}`;
       sourceById.set(clone.element_id, node.element_id);
     }
@@ -432,7 +436,14 @@ export function planFeishuCards(
   }));
   const positions = new Map(leaves.map((leaf, index) => [leaf.key, index]));
   const sealed = previous.filter((page) => page.sealed);
-  const owned = new Set(sealed.flatMap((page) => page.slices.map((slice) => slice.key)));
+  // A running-only footer (elapsed line, live write, plan board) is never inherited by a confirmed
+  // page: it belongs to whichever card is newest, or the user reads a stale ⏳ on a card they
+  // already passed.
+  const owned = new Set(
+    sealed.flatMap((page) =>
+      page.slices.flatMap((slice) => (isTransientLeafKey(slice.key) ? [] : [slice.key])),
+    ),
+  );
   let preserveCount = previous.findIndex((page) => !page.sealed);
   if (preserveCount < 0) preserveCount = previous.length;
   // Growth before a later acknowledged block cannot simply be appended after it.
@@ -536,6 +547,7 @@ export function planFeishuCards(
   for (const old of previous.slice(0, preserveCount)) {
     if (!old.sealed) break;
     const ranges = old.slices.flatMap((slice) => {
+      if (isTransientLeafKey(slice.key)) return [];
       const leaf = byKey.get(slice.key);
       if (!leaf) return [];
       const text = leafText(leaf.node);
@@ -625,6 +637,23 @@ export function planFeishuCards(
   }
   const prefixCount = chunks.length;
   chunks.push(...pack(remaining, prefixCount));
+  // A running footer that merely fits at the bottom of the page where the growth stopped would be
+  // sealed there while a newer card follows. Pull it onto the newest card so no earlier card is
+  // ever left showing a live ⏳ counter or plan board.
+  const footer: CardSlice[] = [];
+  for (let index = chunks.length - 2; index >= prefixCount; index--) {
+    const moved = chunks[index].filter((slice) => isTransientLeafKey(slice.key));
+    if (!moved.length) continue;
+    footer.unshift(...moved);
+    const kept = chunks[index].filter((slice) => !isTransientLeafKey(slice.key));
+    if (kept.length) chunks[index] = kept;
+    else chunks.splice(index, 1);
+  }
+  if (footer.length) {
+    const last = chunks.length - 1;
+    if (last >= 0 && fits([...chunks[last], ...footer], last)) chunks[last] = [...chunks[last], ...footer];
+    else chunks.push(...pack(footer, chunks.length));
+  }
   if (!chunks.length) chunks.push([]);
   const result = chunks.map((slices, index) => {
     const elementIds: Record<string, string[]> = {};

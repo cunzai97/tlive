@@ -10,7 +10,7 @@ import type { FeishuCardElement } from './card-builder.js';
 import type { SubagentCardChunk } from './subagent-budget.js';
 import { buttonElements, codeBlockElement, collapsiblePanel, markdownElement } from './card-elements.js';
 import { redactSensitiveContent } from '../../../shared/utils/content-filter.js';
-import { FEISHU_THINKING_PREVIEW_TOKENS, thinkingTail, type ThinkingPreview } from './thinking-preview.js';
+import { thinkingSegments, thinkingTail, type ThinkingSegment } from './thinking-preview.js';
 import {
   buildProgressTimelineElements as buildLegacyTimelineElements,
   buildProgressContentElements as buildLegacyContentElements,
@@ -29,6 +29,12 @@ import {
   flowElementId,
   flowStatusLabel,
 } from './tool-display.js';
+import {
+  LIVE_WRITE_BODY_ELEMENT_ID,
+  LIVE_WRITE_LINE_ELEMENT_ID,
+  PLAN_BOARD_ELEMENT_ID,
+  PROGRESS_ELAPSED_ELEMENT_ID,
+} from './progress-identity.js';
 
 export { progressHeaderConfig } from './format-progress-legacy.js';
 export type { FlowOptions } from './flow-blocks.js';
@@ -48,82 +54,126 @@ export interface FormatProgressParams {
 export function progressStreamingElementIds(
   data: ProgressData,
   options: FlowOptions = {},
+  bounded = true,
 ): string[] {
   // Identity does not depend on grouping. Do not invoke an exact tokenizer twice per flush.
   const items = collectFlowItems(data, options.registry ?? createDefaultToolDisplayRegistry());
   if (isFlowTerminal(data) && data.completedTraceOnly) {
     while (items[items.length - 1]?.kind === 'text') items.pop();
   }
-  return items
-    .filter((item) => item.kind !== 'tool' && item.text.trim())
-    .map((item) => flowElementId('text', item.id ?? item.kind));
+  const window = thinkingWindow(
+    items.filter((item): item is FlowTextBlock => item.kind === 'thinking'),
+    bounded,
+  );
+  return items.flatMap((item) => {
+    if (item.kind === 'tool' || !item.text.trim()) return [];
+    const identity = item.id ?? item.kind;
+    if (item.kind === 'text') return [flowElementId('text', identity)];
+    return (window.segments.get(identity) ?? []).map((segment) =>
+      flowElementId('text', `${identity}#${segment.index}`),
+    );
+  });
 }
 
-interface ThinkingView extends ThinkingPreview {
-  detailId: string;
+/**
+ * Feishu animates an appended tail and treats any other change as a rewrite: the client wipes the
+ * block and retypes it. So a thought on the card is a list of whole segments that only ever gains a
+ * new one at the end and loses one at the front — never a re-cut of text already on screen.
+ */
+const THINKING_VISIBLE_SEGMENTS = 2;
+
+interface ThinkingWindow {
+  /** Identity to its published segments, in card order. */
+  segments: Map<string, ThinkingSegment[]>;
+  /** Identities whose text is not all on the card. */
+  truncated: Set<string>;
 }
 
-/** One 300-token estimate for all thought previews, newest first, not 300 per historic block. */
-function thinkingViews(blocks: FlowBlock[], params: FormatProgressParams): Map<FlowTextBlock, ThinkingView> {
-  const thoughts = blocks.flatMap(block => block.kind === 'tool_group'
-    ? block.children.filter((child): child is FlowTextBlock => child.kind === 'thinking')
-    : block.kind === 'thinking' ? [block] : []);
+function thinkingWindow(thoughts: readonly FlowTextBlock[], bounded: boolean): ThinkingWindow {
+  const segments = new Map<string, ThinkingSegment[]>();
+  const truncated = new Set<string>();
+  const all: Array<{ identity: string; segment: ThinkingSegment }> = [];
+  const totals = new Map<string, number>();
+  for (const block of thoughts) {
+    const identity = block.id ?? block.kind;
+    // Redact before cutting: a segment boundary through a credential must not defeat redaction.
+    const cut = bounded
+      ? thinkingSegments(redactSensitiveContent(block.text))
+      : [{ index: 0, text: block.text }];
+    totals.set(identity, (totals.get(identity) ?? 0) + cut.length);
+    for (const segment of cut) all.push({ identity, segment });
+  }
+  for (const entry of bounded ? all.slice(Math.max(0, all.length - THINKING_VISIBLE_SEGMENTS)) : all) {
+    const held = segments.get(entry.identity);
+    if (held) held.push(entry.segment);
+    else segments.set(entry.identity, [entry.segment]);
+  }
+  for (const [identity, total] of totals) {
+    if ((segments.get(identity)?.length ?? 0) < total) truncated.add(identity);
+  }
+  return { segments, truncated };
+}
+
+/**
+ * A thought may shed text only while the full block is still reachable through its detail panel;
+ * with nowhere else to go the card keeps publishing all of it. The renderer and the streaming ID
+ * list must reach the same answer, so `retained` asks whether a store is wired up at all — one that
+ * later refuses a block costs that thought its button, not the card's stability.
+ */
+export function thinkingIsBounded(data: ProgressData, retained: boolean): boolean {
+  return retained && Boolean(data.turnId);
+}
+
+/** Thoughts in card order. Nesting moves a thought into a group but never reorders it. */
+function thoughtBlocks(blocks: readonly FlowBlock[]): FlowTextBlock[] {
+  return blocks.flatMap((block) =>
+    block.kind === 'tool_group'
+      ? block.children.filter((child): child is FlowTextBlock => child.kind === 'thinking')
+      : block.kind === 'thinking'
+        ? [block]
+        : [],
+  );
+}
+
+function thinkingDetailIds(
+  thoughts: readonly FlowTextBlock[],
+  params: FormatProgressParams,
+): Map<FlowTextBlock, string> {
   const detailIds = new Map<FlowTextBlock, string>();
   for (const block of thoughts) {
     const id = params.registerThinkingDetails?.(block);
     if (id) detailIds.set(block, id);
   }
-  const views = new Map<FlowTextBlock, ThinkingView>();
-  let remaining = FEISHU_THINKING_PREVIEW_TOKENS;
-  for (let index = thoughts.length - 1; index >= 0; index--) {
-    const block = thoughts[index];
-    const detailId = detailIds.get(block);
-    // Never silently discard content when full-detail retention is unavailable.
-    if (!detailId) continue;
-    // Redact BEFORE slicing: a tail cut through a credential must not defeat redaction.
-    const preview = thinkingTail(redactSensitiveContent(block.text), remaining);
-    remaining -= preview.tokens;
-    views.set(block, { ...preview, detailId });
-  }
-  return views;
+  return detailIds;
 }
 
 function textElements(
   block: FlowTextBlock,
   params: FormatProgressParams,
-  views: Map<FlowTextBlock, ThinkingView>,
+  details: Map<FlowTextBlock, string>,
+  window: ThinkingWindow,
 ): FeishuCardElement[] {
   if (!block.text.trim()) return [];
   const identity = block.id ?? block.kind;
-  const view = views.get(block);
-  const children: FeishuCardElement[] = [];
-  if (!view || view.text) {
-    const body = view?.text ?? block.text;
-    // Reasoning is verbatim model output: fence it so Feishu renders a code block rather than
-    // reparsing markdown, headings and stray backticks inside the thought.
-    const element = block.kind === 'thinking' ? codeBlockElement(body) : params.md(body);
-    children.push({ ...element, element_id: flowElementId('text', identity) });
-  }
   if (block.kind === 'text') {
-    params.subagentChunks?.push({ kind: 'text', elementIds: children.map(node => node.element_id as string) });
-    return children;
+    // Model prose is never capped: params.md only redacts and downgrades headings.
+    const element = { ...params.md(block.text), element_id: flowElementId('text', identity) };
+    params.subagentChunks?.push({ kind: 'text', elementIds: [element.element_id as string] });
+    return [element];
   }
-  if (!view && params.registerThinkingDetails) {
-    children.push(params.md(params.locale === 'zh'
-      ? '完整思考详情暂不可用；为避免丢失内容，此处保留全文。'
-      : 'Full thinking details are unavailable; retaining the complete text here.'));
-  }
-  if (view?.omitted) {
-    children.push(params.md(params.locale === 'zh'
-      ? view.text ? '仅显示最近约 300 Token；较早内容请查看完整思考。' : '较早思考已移至详情，不占主卡正文空间。'
-      : view.text ? 'Latest ~300 estimated tokens only; earlier thoughts are in details.' : 'Earlier thoughts are available in details.'));
-  }
-  if (view) {
+  const children: FeishuCardElement[] = (window.segments.get(identity) ?? []).map((segment) => ({
+    ...params.md(segment.text),
+    element_id: flowElementId('text', `${identity}#${segment.index}`),
+  }));
+  const detailId = details.get(block);
+  if (detailId && window.truncated.has(identity)) {
     children.push(...buttonElements([{
       label: params.locale === 'zh' ? '查看完整思考' : 'View full thinking',
-      callbackData: `flow_detail:open:${view.detailId}`,
+      callbackData: `flow_detail:open:${detailId}`,
     }]));
   }
+  // A starved thought with no reachable history has nothing left to show.
+  if (!children.length) return [];
   params.subagentChunks?.push({ kind: 'thinking', elementIds: [flowElementId('thinking', identity)] });
   return [{
     ...collapsiblePanel(
@@ -169,11 +219,16 @@ export function buildProgressTimelineElements(params: FormatProgressParams): Fei
   if (params.flowOptions?.mode === 'legacy') return buildLegacyTimelineElements(params);
   const registry = params.flowOptions?.registry ?? createDefaultToolDisplayRegistry();
   const blocks = buildFlowBlocks(params.data, { ...params.flowOptions, registry });
-  const views = thinkingViews(blocks, params);
+  const thoughts = thoughtBlocks(blocks);
+  const details = thinkingDetailIds(thoughts, params);
+  const window = thinkingWindow(
+    thoughts,
+    thinkingIsBounded(params.data, params.registerThinkingDetails !== undefined),
+  );
   const elements: FeishuCardElement[] = [];
   for (const block of blocks) {
     if (block.kind !== 'tool_group') {
-      elements.push(...textElements(block, params, views));
+      elements.push(...textElements(block, params, details, window));
       continue;
     }
     const children: FeishuCardElement[] = [];
@@ -186,7 +241,7 @@ export function buildProgressTimelineElements(params: FormatProgressParams): Fei
         params.subagentChunks?.push({ kind: 'tool', elementIds: display.elements.map(node => node.element_id as string), toolName: child.toolName, status: child.status });
         if (display.failureSummary) failures.push({ id: child.id, text: display.failureSummary });
       } else {
-        children.push(...textElements(child, params, views));
+        children.push(...textElements(child, params, details, window));
       }
     }
     const status = block.children.some((child) => child.status === 'failed')
@@ -223,15 +278,22 @@ export function buildProgressTimelineElements(params: FormatProgressParams): Fei
 function liveWriteElements(params: FormatProgressParams): FeishuCardElement[] {
   const live = params.data.liveWrite;
   if (!live) return [];
-  const line = params.md(
-    t('progress.writingFile', params.locale)
-      .replace('{target}', shortPath(live.path ?? live.name))
-      .replace('{lines}', String(live.contentLines))
-      .replace('{chars}', String(live.contentChars)),
-  );
+  const line = {
+    ...params.md(
+      t('progress.writingFile', params.locale)
+        .replace('{target}', shortPath(live.path ?? live.name))
+        .replace('{lines}', String(live.contentLines))
+        .replace('{chars}', String(live.contentChars)),
+    ),
+    element_id: LIVE_WRITE_LINE_ELEMENT_ID,
+  };
   // Redact before slicing: a tail cut through a credential must not defeat redaction.
   const preview = thinkingTail(redactSensitiveContent(live.contentTail));
-  return preview.text ? [line, codeBlockElement(preview.text)] : [line];
+  if (!preview.text) return [line];
+  return [
+    line,
+    { ...codeBlockElement(preview.text), element_id: LIVE_WRITE_BODY_ELEMENT_ID },
+  ];
 }
 
 /** Only supplemental state, never a second copy of the timeline's model output. */
@@ -251,7 +313,10 @@ export function buildProgressContentElements(params: FormatProgressParams): Feis
         `**${t('progress.labelCurrentWait', locale)}**\n${data.permission.toolName}\n\`\`\`\n${data.permission.input}\n\`\`\`${extraQueue}`,
       ),
     );
-    elements.push(md(`**${t('progress.labelElapsedTime', locale)}** ${data.elapsedSeconds}s`));
+    elements.push(
+      { ...md(`**${t('progress.labelElapsedTime', locale)}** ${data.elapsedSeconds}s`),
+        element_id: PROGRESS_ELAPSED_ELEMENT_ID },
+    );
   } else if (!isDone && !hasTrace) {
     if (data.currentTool?.input) {
       const elapsed = data.currentTool.elapsed > 0 ? ` · ${data.currentTool.elapsed}s` : '';
@@ -261,14 +326,20 @@ export function buildProgressContentElements(params: FormatProgressParams): Feis
         ),
       );
     }
-    elements.push(md(`**${t('progress.labelElapsedTime', locale)}** ${data.elapsedSeconds}s`));
+    elements.push(
+      { ...md(`**${t('progress.labelElapsedTime', locale)}** ${data.elapsedSeconds}s`),
+        element_id: PROGRESS_ELAPSED_ELEMENT_ID },
+    );
     elements.push(...liveWriteElements(params));
   } else if (!isDone) {
     const status = [
       data.totalTools > 0 ? `${data.totalTools} tools` : '',
       `${data.elapsedSeconds}s`,
     ].filter(Boolean);
-    elements.push(md(`⏳ ${status.join(' · ')}`));
+    elements.push({
+      ...md(`⏳ ${status.join(' · ')}`),
+      element_id: PROGRESS_ELAPSED_ELEMENT_ID,
+    });
     elements.push(...liveWriteElements(params));
   }
 
@@ -315,7 +386,7 @@ export function buildProgressContentElements(params: FormatProgressParams): Feis
         [markdownElement(todoLines.join('\n'))],
         { expanded: true },
       ),
-      element_id: flowElementId('plan', 'board'),
+      element_id: PLAN_BOARD_ELEMENT_ID,
     });
   }
   return elements;

@@ -1,6 +1,6 @@
 import type { Client } from '@larksuiteoapi/node-sdk';
 import { describe, expect, it, vi } from 'vitest';
-import { configureFeishuCardBudget, fitsFeishuCard, planFeishuCards } from '../../server/channels/feishu/card-budget.js';
+import { configureFeishuCardBudget, fitsFeishuCard, planFeishuCards, type PlannedFeishuCard } from '../../server/channels/feishu/card-budget.js';
 import { sendFeishuMessage, editFeishuMessage, getFeishuMessageIds } from '../../server/channels/feishu/sender.js';
 import { FeishuToolDetails } from '../../server/channels/feishu/tool-details.js';
 import { classifyDefaultError } from '../../server/channels/errors.js';
@@ -95,6 +95,76 @@ describe('independent review continuation regressions', () => {
     expect(output.match(/GAP_NARRATION/g)).toHaveLength(1);
     expect(output.indexOf('_FIRST_END')).toBeLessThan(output.indexOf('GAP_NARRATION'));
     expect(output.indexOf('GAP_NARRATION')).toBeLessThan(output.indexOf('SECOND_INPUT'));
+  });
+
+  it('keeps the running footer on the newest card while a thought streams past the limit', () => {
+    const formatter = new FeishuFormatter('zh');
+    const budget = { maxBytes: 1600, maxElements: 160, maxTables: 4 };
+    const elapsedLine = /⏳ \d+ tools · \d+s/;
+    const data = (text: string, elapsed: number): ProgressData => ({
+      phase: 'executing', totalTools: 3, taskSummary: '', elapsedSeconds: elapsed, renderedText: '',
+      liveWrite: { name: 'write', path: 'src/foo.ts', contentTail: 'const a = 1;\n'.repeat(40), contentChars: 480, contentLines: 40 },
+      todoItems: Array.from({ length: 7 }, (_, i) => ({
+        content: `步骤${i}`,
+        status: i < 5 ? ('completed' as const) : i === 5 ? ('in_progress' as const) : ('pending' as const),
+      })),
+      timeline: [{ kind: 'thinking' as const, blockId: 't1', text, status: 'running' as const }],
+      actionButtons: [],
+    });
+    const page = (plan: PlannedFeishuCard): string => JSON.stringify(JSON.parse(plan.content));
+
+    let previous: PlannedFeishuCard[] = [];
+    let text = '';
+    for (let step = 0; step < 8; step++) {
+      text += `思考片段${step} ${'x'.repeat(300)}\n`;
+      const plans = planFeishuCards(
+        { schema: '2.0', body: { elements: formatter.formatProgress('chat', data(text, 100 + step)).feishuElements } },
+        budget,
+        previous,
+      );
+      previous = plans;
+      const tail = plans.length - 1;
+      expect(plans[tail].sealed).toBe(false);
+      // Relocating a footer must not strand a page with nothing left on it.
+      expect(plans.every((plan) => JSON.parse(plan.content).body.elements.length > 0)).toBe(true);
+      // ⏳ counters, plan boards and write previews exist only while running; freezing one onto a
+      // confirmed page leaves a live status on a card the user already read past.
+      for (const marker of [elapsedLine, /工作进度/, /正在写入/]) {
+        const holders = plans
+          .map((plan, index) => (marker.test(page(plan)) ? index : -1))
+          .filter((index) => index >= 0);
+        expect(holders).toEqual([tail]);
+      }
+      const printed = plans.flatMap((plan) => markdown(JSON.parse(plan.content))).join('');
+      expect(printed.split('x').length - 1).toBe(300 * (step + 1));
+    }
+  });
+
+  it('clears the running footer from every card once the turn completes', () => {
+    const formatter = new FeishuFormatter('zh');
+    const budget = { maxBytes: 1600, maxElements: 160, maxTables: 4 };
+    const data = (phase: ProgressData['phase'], text: string): ProgressData => ({
+      phase, totalTools: 3, taskSummary: '', elapsedSeconds: 200, renderedText: '',
+      todoItems: [{ content: '步骤0', status: 'completed' }],
+      timeline: [{ kind: 'thinking' as const, blockId: 't1', text, status: phase === 'completed' ? ('completed' as const) : ('running' as const) }],
+      actionButtons: [],
+    });
+    const render = (input: ProgressData) =>
+      ({ schema: '2.0', body: { elements: formatter.formatProgress('chat', input).feishuElements } });
+    let text = '';
+    let previous: PlannedFeishuCard[] = [];
+    for (let step = 0; step < 6; step++) {
+      text += `${'x'.repeat(300)}\n`;
+      previous = planFeishuCards(render(data('executing', text)), budget, previous);
+    }
+    const final = planFeishuCards(render(data('completed', text)), budget, previous);
+    const body = JSON.stringify(final.map((plan) => JSON.parse(plan.content)));
+    expect(body).not.toMatch(/⏳ \d+ tools/);
+    const boards = final
+      .map((plan, index) => (plan.content.includes('工作进度') ? index : -1))
+      .filter((index) => index >= 0);
+    expect(boards).toEqual([final.length - 1]);
+    expect(final[final.length - 1].content).toContain('步骤0');
   });
 
   it('reuses a detail open UUID after the platform sends the card but the response is lost', async () => {

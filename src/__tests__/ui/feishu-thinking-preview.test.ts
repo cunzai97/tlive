@@ -1,18 +1,17 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ProgressData } from '../../shared/formatting/message-types.js';
 import { FeishuFormatter } from '../../server/channels/feishu/formatter.js';
+import { progressStreamingElementIds } from '../../server/channels/feishu/format-progress.js';
 import { estimatedTokenCount } from '../../server/channels/feishu/flow-blocks.js';
 import { flowElementId } from '../../server/channels/feishu/tool-display.js';
 import type { FeishuToolDetails } from '../../server/channels/feishu/tool-details.js';
-import { FEISHU_THINKING_PREVIEW_TOKENS, thinkingTail } from '../../server/channels/feishu/thinking-preview.js';
+import { FEISHU_THINKING_PREVIEW_TOKENS, FEISHU_THINKING_SEGMENT_TOKENS, thinkingSegments, thinkingTail } from '../../server/channels/feishu/thinking-preview.js';
 
 function nodes(value: unknown): Array<Record<string, any>> {
   if (!value || typeof value !== 'object') return [];
   if (Array.isArray(value)) return value.flatMap(nodes);
   return [value as Record<string, any>, ...Object.values(value).flatMap(nodes)];
 }
-/** Thinking is fenced so Feishu renders a code block; the preview budget still counts the body alone. */
-const unfenced = (content: string): string => /^(`{3,})\n([\s\S]*)\n\1$/u.exec(content)?.[2] ?? content;
 const progress = (timeline: ProgressData['timeline'], extra: Partial<ProgressData> = {}): ProgressData => ({
   turnId: 'turn', phase: 'executing', taskSummary: '任务', renderedText: '', totalTools: 0,
   elapsedSeconds: 1, todoItems: [], actionButtons: [], timeline, ...extra,
@@ -28,7 +27,7 @@ function fixture(available = true) {
   return { formatter: new FeishuFormatter('zh', { toolDetails: details }), retained, registerThinking };
 }
 
-describe('bounded display-only thinking suffix', () => {
+describe('bounded body preview helper, now only the live write tail', () => {
   it('defaults to an explicit 300-token estimate', () => {
     expect(FEISHU_THINKING_PREVIEW_TOKENS).toBe(300);
     const tail = thinkingTail('旧'.repeat(10000) + '新'.repeat(300));
@@ -53,69 +52,153 @@ describe('bounded display-only thinking suffix', () => {
   });
 });
 
-describe('thinking preview formatting without hidden full-history JSON', () => {
-  it('retains the full semantic block in details but serializes only its suffix', () => {
+describe('whole-segment cuts, so a published boundary never moves', () => {
+  it('cuts from the left at the estimate the sliding preview used', () => {
+    expect(FEISHU_THINKING_SEGMENT_TOKENS).toBe(300);
+    expect(thinkingSegments('思'.repeat(1000)).map((part) => part.text.length)).toEqual([300, 300, 300, 100]);
+    expect(thinkingSegments('思'.repeat(1000)).map((part) => part.index)).toEqual([0, 1, 2, 3]);
+    expect(thinkingSegments('x'.repeat(5000)).map((part) => part.text.length)).toEqual([1200, 1200, 1200, 1200, 200]);
+  });
+  it('keeps every earlier segment byte-identical as the text grows', () => {
+    const short = thinkingSegments('旧'.repeat(290));
+    const long = thinkingSegments('旧'.repeat(290) + '新'.repeat(610));
+    expect(long[0].text).toBe(short[0].text + '新'.repeat(10));
+    expect(long[1].text).toBe('新'.repeat(300));
+    expect(long.map((part) => part.text.length)).toEqual([300, 300, 300]);
+  });
+  it('prefers a line end, because heading downgrading works per line', () => {
+    const [first, second] = thinkingSegments(`${'句'.repeat(200)}\n${'句'.repeat(200)}\n`);
+    expect(first.text).toBe(`${'句'.repeat(200)}\n`);
+    expect(second.text).toBe(`${'句'.repeat(200)}\n`);
+  });
+  it('does not split an astral code point and loses no character', () => {
+    const parts = thinkingSegments('🐾'.repeat(400));
+    expect(parts.map((part) => part.text)).toEqual(['🐾'.repeat(300), '🐾'.repeat(100)]);
+    expect(parts.map((part) => part.text.length)).toEqual([600, 200]);
+  });
+  it('returns nothing for empty text or a budget that cannot hold a character', () => {
+    expect(thinkingSegments('')).toEqual([]);
+    for (const budget of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) expect(thinkingSegments('内容', budget)).toEqual([]);
+  });
+});
+
+describe('thinking bodies published as whole segments', () => {
+  const body = (message: ReturnType<FeishuFormatter['formatProgress']>, identity: string): string =>
+    String(nodes(message).find(node => node.element_id === flowElementId('text', identity))?.content ?? '');
+  const render = (text: string, extra: Partial<ProgressData> = {}) => {
+    const { formatter } = fixture();
+    return formatter.formatProgress('chat', progress([{ kind: 'thinking', blockId: 'thought', text }], extra));
+  };
+
+  it('caps a long thought at its newest segments instead of rewriting it', () => {
     const { formatter, retained } = fixture();
-    const full = 'REMOVED_OLD_THOUGHT' + '旧'.repeat(5000) + '新'.repeat(300);
+    const full = '头'.repeat(300) + '尾'.repeat(700);
     const data = progress([{ kind: 'thinking', blockId: 'thought', text: full }], { renderedText: full });
     const original = structuredClone(data);
     const message = formatter.formatProgress('chat', data);
     const json = JSON.stringify(message);
-    expect(json).not.toContain('REMOVED_OLD_THOUGHT');
-    expect(json).not.toContain('旧'.repeat(100));
-    expect(json).toContain('新'.repeat(300));
+    // The two newest segments are on the card, whole. Dropping the head as a whole block is what a
+    // client can render; re-cutting it to a moving tail is the wipe-and-reprint the old window did.
+    expect(body(message, 'thought#2')).toBe('尾'.repeat(300));
+    expect(body(message, 'thought#3')).toBe('尾'.repeat(100));
+    expect(body(message, 'thought#0')).toBe('');
+    expect(json).not.toContain('头');
     expect(json).toContain('查看完整思考');
-    expect(json).toContain('仅显示最近约 300 Token');
+    expect(json).not.toContain('仅显示最近约 300 Token');
     expect(retained.get('turn:thought')!.text).toBe(full);
     expect(data).toEqual(original);
     expect(nodes(message).find(node => node.tag === 'collapsible_panel')!.expanded).toBe(true);
     expect(message.feishuSnapshot).toBe(true);
   });
-  it('has one shared 300-token budget across historical and nested thought blocks', () => {
+  it('keeps the payload the same size however long the thought becomes', () => {
+    const first = JSON.stringify(render('旧'.repeat(30_000)));
+    const later = JSON.stringify(render('旧'.repeat(60_000)));
+    expect(first.length).toBe(later.length);
+    expect(JSON.parse(later)).not.toEqual(JSON.parse(first));
+  });
+  it('appends to a published segment, then retires it whole when the window moves on', () => {
+    const growing = render('旧'.repeat(290));
+    const appended = render('旧'.repeat(290) + '新'.repeat(20));
+    expect(body(appended, 'thought#0').startsWith(body(growing, 'thought#0'))).toBe(true);
+    expect(body(appended, 'thought#1')).toBe('新'.repeat(10));
+    // Past two segments the oldest leaves the card as one block — the behaviour the user expects.
+    const rolled = render('旧'.repeat(290) + '新'.repeat(420));
+    expect(body(rolled, 'thought#0')).toBe('');
+    expect(body(rolled, 'thought#1')).toBe('新'.repeat(300));
+    expect(body(rolled, 'thought#2')).toBe('新'.repeat(110));
+  });
+  it('shares one two-segment budget across thoughts and keeps starved history reachable', () => {
     const { formatter } = fixture();
     const message = formatter.formatProgress('chat', progress([
-      { kind: 'thinking', blockId: 'old', text: '消失'.repeat(1500) },
-      { kind: 'text', blockId: 'answer', text: '模型正文不裁剪'.repeat(700) },
+      { kind: 'thinking', blockId: 'old', text: '旧'.repeat(300) },
       { kind: 'tool', toolId: 'one', toolName: 'Read', status: 'completed', toolResult: 'ok' },
-      { kind: 'thinking', blockId: 'middle', text: '中'.repeat(40) },
+      { kind: 'thinking', blockId: 'middle', text: '中'.repeat(300) },
       { kind: 'tool', toolId: 'two', toolName: 'Read', status: 'completed', toolResult: 'ok' },
-      { kind: 'thinking', blockId: 'latest', text: '最'.repeat(270) },
+      { kind: 'thinking', blockId: 'latest', text: '最'.repeat(300) },
     ]));
-    const all = nodes(message);
-    const bodies = ['old', 'middle', 'latest'].map(id => all.find(node => node.element_id === flowElementId('text', id))?.content ?? '');
-    const thoughtText = bodies.map(unfenced);
-    expect(thoughtText).toEqual(['', '中'.repeat(30), '最'.repeat(270)]);
-    expect(bodies.slice(1).every(content => content.startsWith('```') && content.endsWith('```'))).toBe(true);
-    expect(estimatedTokenCount(thoughtText.join(''))).toBe(300);
-    expect(JSON.stringify(message)).not.toContain('消失'.repeat(20));
-    expect(JSON.stringify(message)).toContain('模型正文不裁剪'.repeat(700));
-    expect(all.filter(node => node.tag === 'button' && node.text?.content === '查看完整思考')).toHaveLength(3);
+    expect(body(message, 'old#0')).toBe('');
+    expect(body(message, 'middle#0')).toBe('中'.repeat(300));
+    expect(body(message, 'latest#0')).toBe('最'.repeat(300));
+    expect(nodes(message).some(node => node.element_id === flowElementId('thinking', 'old'))).toBe(true);
+    // Only a thought with text off-card asks for the detail panel; a fully shown one does not.
+    expect(nodes(message).filter(node => node.tag === 'button' && node.text?.content === '查看完整思考')).toHaveLength(1);
   });
-  it('keeps payload size bounded as one thinking block grows, and preserves button identity', () => {
+  it('publishes model prose uncapped', () => {
     const { formatter } = fixture();
-    const render = (text: string) => formatter.formatProgress('chat', progress([{ kind: 'thinking', blockId: 'thought', text }]));
+    const text = '模型正文不裁剪'.repeat(700);
+    const message = formatter.formatProgress('chat', progress([
+      { kind: 'thinking', blockId: 'thought', text: '思考'.repeat(1000) },
+      { kind: 'text', blockId: 'answer', text },
+    ]));
+    expect(JSON.stringify(message)).toContain(text);
+  });
+  it('lists exactly the thought segments the card carries, newest last', () => {
+    const { formatter } = fixture();
+    const data = progress([{ kind: 'thinking', blockId: 'thought', text: '旧'.repeat(1000) }]);
+    const present = new Set(nodes(formatter.formatProgress('chat', data)).map(node => node.element_id));
+    const ids = progressStreamingElementIds(data, {}, true);
+    expect(ids).toEqual([flowElementId('text', 'thought#2'), flowElementId('text', 'thought#3')]);
+    // A streaming ID the card does not have is how a page ends up never finishing its animation.
+    expect(ids.every(id => present.has(id))).toBe(true);
+    const uncapped = progress([{ kind: 'thinking', blockId: 'thought', text: '旧'.repeat(1000) }], { turnId: undefined });
+    expect(progressStreamingElementIds(uncapped, {}, false)).toEqual([flowElementId('text', 'thought#0')]);
+  });
+  it('keeps detail identity stable while a thought grows past its first segment', () => {
+    const actions = (message: ReturnType<FeishuFormatter['formatProgress']>) => nodes(message)
+      .filter(node => node.tag === 'button' && node.text?.content === '查看完整思考')
+      .map(node => node.value?.action);
     const first = render('旧'.repeat(400) + '尾'.repeat(300));
-    const huge = render('旧'.repeat(30000) + '尾'.repeat(300));
-    expect(JSON.stringify(huge)).toBe(JSON.stringify(first));
+    const huge = render('旧'.repeat(400) + '尾'.repeat(300) + '继续'.repeat(9000));
+    expect(actions(huge)).toEqual(actions(first));
   });
-  it('preserves full content when retention is unavailable rather than silently deleting history', () => {
+  it('publishes the whole thought when no detail store is configured to hold history', () => {
     const full = '不能丢'.repeat(1000);
-    const { formatter } = fixture(false);
-    const json = JSON.stringify(formatter.formatProgress('chat', progress([{ kind: 'thinking', blockId: 'thought', text: full }])));
-    expect(json).toContain(full);
-    expect(json).not.toContain('查看完整思考');
+    const message = new FeishuFormatter('zh').formatProgress('chat', progress([
+      { kind: 'thinking', blockId: 'thought', text: full },
+    ]));
+    expect(body(message, 'thought#0')).toBe(full);
+    expect(JSON.stringify(message)).not.toContain('查看完整思考');
   });
-  it('redacts the full source before cutting through a long credential', () => {
+  it('still shows the newest segments, without a button, if retention refuses the block', () => {
+    const { formatter } = fixture(false);
+    const message = formatter.formatProgress('chat', progress([
+      { kind: 'thinking', blockId: 'thought', text: '旧'.repeat(1000) },
+    ]));
+    expect(body(message, 'thought#2')).toBe('旧'.repeat(300));
+    expect(body(message, 'thought#3')).toBe('旧'.repeat(100));
+    expect(JSON.stringify(message)).not.toContain('查看完整思考');
+  });
+  it('redacts a long credential before any segment boundary can cut through it', () => {
     const { formatter } = fixture();
     const synthetic = 'sk-' + 'A'.repeat(2000);
     const message = formatter.formatProgress('chat', progress([
-      { kind: 'thinking', blockId: 'thought', text: `旧思考 ${synthetic} 结尾` },
+      { kind: 'thinking', blockId: 'thought', text: `${'旧'.repeat(400)} ${synthetic} ${'尾'.repeat(400)}` },
     ]));
     const json = JSON.stringify(message);
     expect(json).toContain('[REDACTED]');
     expect(json).not.toContain('A'.repeat(50));
   });
-  it('hands thought text to Feishu as a code block without reparsing its markdown', () => {
+  it('hands thought text to Feishu as markdown, downgrading its headings like the answer', () => {
     const { formatter } = fixture();
     const thought = '# 标题\n用 `行内代码` 和 ```围栏``` 举例\n结尾反引号 ``';
     const message = formatter.formatProgress('chat', progress([
@@ -123,10 +206,9 @@ describe('thinking preview formatting without hidden full-history JSON', () => {
       { kind: 'text', blockId: 'answer', text: '# 正文标题仍然降级' },
     ]));
     const all = nodes(message);
-    const content = all.find(node => node.element_id === flowElementId('text', 'thought'))!.content as string;
-    // The body carries a triple-backtick run, so a plain fence would close the block early.
-    expect(content).toBe(`\`\`\`\`\n${thought}\n\`\`\`\``);
-    expect(content).toContain('# 标题');
+    const content = all.find(node => node.element_id === flowElementId('text', 'thought#0'))!.content as string;
+    // No fence wrapper any more; the thought keeps its own backticks and only headings are rewritten.
+    expect(content).toBe('**标题**\n用 `行内代码` 和 ```围栏``` 举例\n结尾反引号 ``');
     const answer = all.find(node => node.element_id === flowElementId('text', 'answer'))!.content as string;
     expect(answer).toBe('**正文标题仍然降级**');
   });
@@ -137,8 +219,9 @@ describe('thinking preview formatting without hidden full-history JSON', () => {
       { kind: 'thinking', blockId: 'legacy-shared', text },
     ], { turnId: undefined }));
     expect(registerThinking).not.toHaveBeenCalled();
-    expect(JSON.stringify(message)).toContain(text);
-    expect(JSON.stringify(message)).toContain('完整思考详情暂不可用');
+    // Without a detail panel to fall back on, an uncapped body is the only lossless choice.
+    expect(body(message, 'legacy-shared#0')).toBe(text);
+    expect(JSON.stringify(message)).not.toContain('查看完整思考');
   });
   it('keeps terminal thoughts folded and gives each turn a separate detail identity', () => {
     const { formatter, retained } = fixture();

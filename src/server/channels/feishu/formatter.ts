@@ -63,6 +63,7 @@ import {
   buildProgressContentElements,
   progressHeaderConfig,
   progressStreamingElementIds,
+  thinkingIsBounded,
 } from './format-progress.js';
 import { buildStatusElements } from './format-status.js';
 import { actionCallback } from '../../../shared/core/callbacks.js';
@@ -476,7 +477,11 @@ export class FeishuFormatter implements MessageFormatter<FeishuRenderedMessage> 
           data.phase !== 'completed' &&
           data.phase !== 'failed' &&
           data.phase !== 'waiting_permission',
-        elementIds: progressStreamingElementIds(data, this.options.flowOptions),
+        elementIds: progressStreamingElementIds(
+          data,
+          this.options.flowOptions,
+          thinkingIsBounded(data, Boolean(this.options.toolDetails)),
+        ),
       };
     } else {
       message.feishuSnapshot = true;
