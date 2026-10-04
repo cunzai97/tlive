@@ -1,10 +1,17 @@
 import type { Client } from '@larksuiteoapi/node-sdk';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { FEISHU_SNAPSHOT_REFRESH_MS } from '../../shared/feishu-card-config.js';
+import {
+  DEFAULT_FEISHU_NATIVE_PRINT,
+  FEISHU_SNAPSHOT_PATCH_MIN_MS,
+  FEISHU_SNAPSHOT_REFRESH_MS,
+  feishuNativePrintRatePerSecond,
+  type FeishuNativePrintSettings,
+} from '../../shared/feishu-card-config.js';
 import type { ProgressData } from '../../shared/formatting/message-types.js';
 import { QueryPresentationFactory } from '../../server/engine/coordinators/query-presentation.js';
 import { classifyDefaultError } from '../../server/channels/errors.js';
 import { configureFeishuCardBudget, fitsFeishuCard } from '../../server/channels/feishu/card-budget.js';
+import { API_INTERVAL_MS } from '../../server/channels/feishu/native-streaming.js';
 import { editFeishuMessage, getFeishuMessageIds, sendFeishuMessage } from '../../server/channels/feishu/sender.js';
 import type { FeishuRenderedMessage } from '../../server/channels/feishu/types.js';
 
@@ -41,6 +48,8 @@ let maxBytes: number;
 const snapshots: Array<Record<string, any>> = [];
 /** Every timing assertion here means "one configured refresh interval", not a magic 400. */
 const REFRESH = FEISHU_SNAPSHOT_REFRESH_MS;
+/** The sender edits one physical card no faster than this, whatever the render cadence asks for. */
+const PATCH = FEISHU_SNAPSHOT_PATCH_MIN_MS;
 
 function nodes(value: unknown): Array<Record<string, any>> {
   if (!value || typeof value !== 'object') return [];
@@ -48,10 +57,6 @@ function nodes(value: unknown): Array<Record<string, any>> {
   const node = value as Record<string, any>;
   return [node, ...Object.values(node).flatMap(nodes)];
 }
-/** Thinking is fenced for Feishu's code block; assertions care about the body. */
-const thoughtBody = (content: unknown): string =>
-  /^(`{3,})\n([\s\S]*)\n\1$/u.exec(String(content))?.[2] ?? String(content);
-const fenced = (body: string): string => `\`\`\`\n${body}\n\`\`\``;
 function find(card: Record<string, any>, id: string) {
   const result = nodes(card).find((node) => node.element_id === id);
   if (!result) throw new Error(`Unknown SDK element ${id}`);
@@ -197,14 +202,14 @@ describe('native flow on the real Feishu presentation/sender path', () => {
       const panel = nodes(firstCard).find((node) => node.tag === 'collapsible_panel')!;
       expect(panel.expanded).toBe(true);
       expect(panel.header.title.content).toContain('进行中');
-      expect(thoughtBody(nodes(panel).find((node) => node.tag === 'markdown')!.content)).toBe('我先分析');
+      expect(nodes(panel).find((node) => node.tag === 'markdown')!.content).toBe('我先分析');
       expect(firstCard.config.streaming_mode).toBe(true);
       expect(JSON.stringify(firstCard)).not.toContain('Starting');
-      const firstElement = sdk.text.mock.calls.find(([request]) => request.data.content === fenced('我先分析'))![0].path;
+      const firstElement = sdk.text.mock.calls.find(([request]) => request.data.content === '我先分析')![0].path;
       turn.renderer.onThinkingDelta('，还在继续思考');
       await vi.advanceTimersByTimeAsync(REFRESH);
       expect(sdk.text.mock.calls.some(([request]) => request.path.card_id === firstElement.card_id &&
-        request.path.element_id === firstElement.element_id && request.data.content === fenced('我先分析，还在继续思考'))).toBe(true);
+        request.path.element_id === firstElement.element_id && request.data.content === '我先分析，还在继续思考')).toBe(true);
       expect(nodes(remoteMessage(firstMessage)).find((node) => node.tag === 'collapsible_panel')!.expanded).toBe(true);
       expect(sdk.cardCreate).toHaveBeenCalledTimes(1);
       expect(sdk.imPatch).not.toHaveBeenCalled();
@@ -217,7 +222,7 @@ describe('native flow on the real Feishu presentation/sender path', () => {
     } finally { turn.renderer.dispose(); }
   });
 
-  it('keeps an already printed thought inside its code block across a structural change', async () => {
+  it('keeps appending to an already printed thought across a structural change', async () => {
     const factory = new QueryPresentationFactory({ defaultWorkdir: '/tmp' });
     const turn = factory.createTurn({ adapter, msg: {
       channelType: 'feishu', chatId: 'chat', threadId: 'thread', userId: 'owner', text: '测试',
@@ -227,19 +232,100 @@ describe('native flow on the real Feishu presentation/sender path', () => {
     try {
       turn.renderer.onThinkingDelta('我先分析');
       await vi.advanceTimersByTimeAsync(600);
-      const printed = sdk.text.mock.calls.find(([request]) => thoughtBody(request.data.content) === '我先分析');
+      const printed = sdk.text.mock.calls.find(([request]) => request.data.content === '我先分析');
       expect(printed).toBeTruthy();
       const elementId = printed![0].path.element_id;
-      // Starting a tool changes the card topology, which is where a fenced tail used to be wiped.
+      // Starting a tool changes the card topology, which is where a moving tail used to be wiped.
       turn.renderer.onToolStart('Read', { path: '/tmp/x' }, 'call-1');
       await vi.advanceTimersByTimeAsync(600);
       expect(sdk.text.mock.calls.filter(([request]) => request.path.element_id === elementId)
         .map(([request]) => request.data.content)).not.toContain('');
       const firstMessage = [...messages.keys()][0];
       const held = nodes(remoteMessage(firstMessage)).filter(node => node.tag === 'markdown')
-        .map(node => node.content).filter(content => thoughtBody(content) === '我先分析');
-      expect(held).toEqual([fenced('我先分析')]);
+        .map(node => node.content).filter(content => content === '我先分析');
+      expect(held).toEqual(['我先分析']);
       await settle(turn.renderer.onComplete());
+      assertEntityBudgets();
+    } finally { turn.renderer.dispose(); }
+  });
+
+  it('rolls the thinking window forward without rewriting a segment the client already printed', async () => {
+    const factory = new QueryPresentationFactory({ defaultWorkdir: '/tmp' });
+    const turn = factory.createTurn({ adapter, msg: {
+      channelType: 'feishu', chatId: 'chat', threadId: 'thread', userId: 'owner', text: '测试',
+      messageId: 'request', replyInThread: true, replyTargetMessageId: 'request',
+    }, binding: {}, sessionKey: 'session', reactions: { permission: 'Pin', processing: 'Typing', stalled: 'OneSecond' },
+      typing: { stop() {} }, onMessageId() {} });
+    try {
+      // Eight 100-character blocks cross two 300-token segment boundaries, so the window has to
+      // retire a whole block. Each content op below is one the client animates: an op that is not a
+      // longer tail of the same element is exactly the wipe-and-reprint the user reported.
+      for (let block = 0; block < 8; block++) {
+        turn.renderer.onThinkingDelta(`第${block}块`.padEnd(100, '填'));
+        await vi.advanceTimersByTimeAsync(REFRESH);
+      }
+      const printed = new Map<string, string>();
+      const rewritten: string[] = [];
+      for (const [request] of sdk.text.mock.calls) {
+        const key = `${request.path.card_id}:${request.path.element_id}`;
+        const held = printed.get(key);
+        if (held !== undefined && !request.data.content.startsWith(held)) rewritten.push(key);
+        printed.set(key, request.data.content);
+      }
+      expect(rewritten).toEqual([]);
+      expect(printed.size).toBeGreaterThan(2);
+      const visible = semanticText('');
+      // The budget counts estimated tokens, not characters, so the cut does not land on a block
+      // boundary: the card carries from block 4 on, and blocks 0-2 retired as whole segments.
+      expect(visible).not.toContain('第0块');
+      expect(visible).not.toContain('第2块');
+      expect(visible).toContain('第4块');
+      expect(visible).toContain('第7块');
+      await settle(turn.renderer.onComplete());
+      assertEntityBudgets();
+    } finally { turn.renderer.dispose(); }
+  });
+
+  it('hands the running timer and plan board to the newest physical card when the trace overflows', async () => {
+    const factory = new QueryPresentationFactory({ defaultWorkdir: '/tmp' });
+    const turn = factory.createTurn({ adapter, msg: {
+      channelType: 'feishu', chatId: 'chat', threadId: 'thread', userId: 'owner', text: '测试',
+      messageId: 'request', replyInThread: true, replyTargetMessageId: 'request',
+    }, binding: {}, sessionKey: 'session', reactions: { permission: 'Pin', processing: 'Typing', stalled: 'OneSecond' },
+      typing: { stop() {} }, onMessageId() {} });
+    try {
+      turn.renderer.onTodoUpdate([
+        { content: '读取数据', status: 'completed' },
+        { content: '清洗字段', status: 'completed' },
+        { content: '聚合输出', status: 'in_progress' },
+        { content: '写测试', status: 'pending' },
+      ]);
+      const newestOnly = (pattern: RegExp | string, label: string): void => {
+        const bodies = [...messages.keys()].map((id) => JSON.stringify(remoteMessage(id)));
+        const holders = bodies
+          .map((body, index) =>
+            (typeof pattern === 'string' ? body.includes(pattern) : pattern.test(body)) ? index : -1,
+          )
+          .filter((index) => index >= 0);
+        // An earlier card still printing the ⏳ timer or the plan board reads as live status the
+        // user already scrolled past; both belong to whichever card is newest.
+        expect(holders, `${label} after ${bodies.length} cards`).toEqual([bodies.length - 1]);
+      };
+      for (let round = 0; round < 16; round++) {
+        turn.renderer.onThinkingDelta(`第${round}轮思考，` + '分'.repeat(60));
+        turn.renderer.onToolStart('bash', { command: `step-${round} ` + 'x'.repeat(120) }, `c${round}`);
+        turn.renderer.onToolResult(`c${round}`, 'ok', false);
+        await vi.advanceTimersByTimeAsync(REFRESH);
+        newestOnly(/⏳ \d+ tools/, 'timer');
+        newestOnly('工作进度', 'board');
+      }
+      expect(messages.size).toBeGreaterThan(3);
+      const printed = [...messages.keys()].map((id) => JSON.stringify(remoteMessage(id))).join('');
+      expect(printed).toContain('step-0');
+      expect(printed).toContain('写测试');
+      await settle(turn.renderer.onComplete());
+      const settled = [...messages.keys()].map((id) => JSON.stringify(remoteMessage(id)));
+      expect(settled.some((body) => /⏳ \d+ tools/.test(body))).toBe(false);
       assertEntityBudgets();
     } finally { turn.renderer.dispose(); }
   });
@@ -413,7 +499,6 @@ async function withSnapshotTurn(
 describe('configured-interval latest-state snapshots without a typing animation', () => {
   it('shows the first thought immediately and replaces long/fast output every refresh without CardKit', async () => {
     await withSnapshotTurn(async (turn, ordinary) => {
-      expect(ordinary.usesNativeProgressStreaming()).toBe(false);
       expect(ordinary.format({ type: 'progress', chatId: 'chat', data: progress([]) }).feishuStreaming).toBeUndefined();
       const updates: number[] = [];
       const patch = sdk.imPatch.getMockImplementation()!;
@@ -434,7 +519,11 @@ describe('configured-interval latest-state snapshots without a typing animation'
       const text = '正文' + 'x'.repeat(12000);
       turn.renderer.onTextDelta(text);
       await vi.advanceTimersByTimeAsync(REFRESH);
-      expect(updates.map(time => time - start)).toEqual([REFRESH, REFRESH * 2]);
+      // The renderer asked for the next snapshot on time, but this physical card may not be
+      // edited faster than PATCH, so the request waits rather than being dropped.
+      expect(updates.map(time => time - start)).toEqual([REFRESH]);
+      await vi.advanceTimersByTimeAsync(PATCH);
+      expect(updates.map(time => time - start)).toEqual([REFRESH, REFRESH + PATCH]);
       expect(messages.get(id)).toContain(text);
       expect(nodes(remoteMessage(id)).find((node) => node.tag === 'collapsible_panel')!.expanded).toBe(false);
       await vi.advanceTimersByTimeAsync(1000);
@@ -506,7 +595,10 @@ describe('configured-interval latest-state snapshots without a typing animation'
       // A zero-delay continuation runs on the next timer tick, not inside the
       // just-completed request's callback.
       await vi.advanceTimersByTimeAsync(1);
-      expect(updates.map(update => update.at - start)).toEqual([REFRESH, REFRESH + slow + 1]);
+      // The queued snapshot waits for the card's edit floor instead of hitting 230020.
+      expect(updates.map(update => update.at - start)).toEqual([REFRESH]);
+      await vi.advanceTimersByTimeAsync(PATCH - slow - 1);
+      expect(updates.map(update => update.at - start)).toEqual([REFRESH, REFRESH + PATCH]);
       expect(updates[1].content).toContain('开始第一批二三四五最新');
       expect(maxInflight).toBe(1);
       // The recorded request is the wire call; the stored message only changes once it lands.
@@ -519,7 +611,7 @@ describe('configured-interval latest-state snapshots without a typing animation'
     });
   });
 
-  it('keeps only the latest thought suffix on the real renderer path while retaining full scoped details', async () => {
+  it('keeps only the newest thought segments on the real renderer path while retaining full scoped details', async () => {
     await withSnapshotTurn(async (turn) => {
       const first = 'OLD_THINKING_BEGIN' + '旧思考'.repeat(2000);
       turn.renderer.onThinkingDelta(first);
@@ -557,7 +649,7 @@ describe('configured-interval latest-state snapshots without a typing animation'
     });
   });
 
-  it('protects each physical snapshot message at the refresh interval even for rapid state changes', async () => {
+  it('protects each physical snapshot message at the card-edit floor even for rapid state changes', async () => {
     await withSnapshotTurn(async (_turn, ordinary) => {
       const render = (text: string, phase: ProgressData['phase'] = 'executing') => ordinary.format({
         type: 'progress', chatId: 'chat', data: progress([{ kind: 'text', blockId: 'answer', text }], { phase }),
@@ -574,15 +666,109 @@ describe('configured-interval latest-state snapshots without a typing animation'
       const terminal = ordinary.editMessage('chat', sent.messageId, render('ABCD', 'completed'));
       await vi.advanceTimersByTimeAsync(0);
       expect(updates.map(time => time - start)).toEqual([0]);
-      await vi.advanceTimersByTimeAsync(REFRESH - 1);
+      await vi.advanceTimersByTimeAsync(PATCH - 1);
       expect(updates).toHaveLength(1);
       await vi.advanceTimersByTimeAsync(1);
-      expect(updates.map(time => time - start)).toEqual([0, REFRESH]);
-      await vi.advanceTimersByTimeAsync(REFRESH);
+      expect(updates.map(time => time - start)).toEqual([0, PATCH]);
+      await vi.advanceTimersByTimeAsync(PATCH);
       await Promise.all([first, second, terminal]);
-      expect(updates.map(time => time - start)).toEqual([0, REFRESH, REFRESH * 2]);
+      expect(updates.map(time => time - start)).toEqual([0, PATCH, PATCH * 2]);
       expect(messages.get(sent.messageId)).toContain('ABCD');
       expect(sdk.imCreate).toHaveBeenCalledTimes(1);
+    });
+  });
+});
+
+async function withNativeTurn(
+  nativePrint: FeishuNativePrintSettings,
+  run: (turn: ReturnType<QueryPresentationFactory['createTurn']>, streaming: FeishuAdapter) => Promise<void>,
+): Promise<void> {
+  const streaming = new FeishuAdapter({ appId: 'test', appSecret: 'test', verificationToken: '', encryptKey: '', allowedUsers: ['owner'] }, {
+    botOpenId: 'bot', botName: 'testbot',
+    cardFlow: {
+      mode: 'blocks', nativeStreaming: true, nativePrint,
+      groupGapTokens: 50, maxBytes: 24000, maxElements: 160, toolRules: {},
+    },
+  });
+  await streaming.start();
+  const factory = new QueryPresentationFactory({ defaultWorkdir: '/tmp' });
+  const turn = factory.createTurn({ adapter: streaming, msg: {
+    channelType: 'feishu', chatId: 'chat', threadId: 'thread', userId: 'owner', text: '测试原生节拍',
+    messageId: 'request', replyInThread: true, replyTargetMessageId: 'request',
+  }, binding: {}, sessionKey: 'session', reactions: { permission: 'Pin', processing: 'Typing', stalled: 'OneSecond' },
+    typing: { stop() {} }, onMessageId() {} });
+  try { await run(turn, streaming); }
+  finally { turn.renderer.dispose(); await streaming.stop(); }
+}
+
+describe('native page speed: entity config and cadence', () => {
+  it('puts the configured print numbers onto the created card entity', async () => {
+    await withNativeTurn({ strategy: 'fast', frequencyMs: 50, step: 60 }, async (_turn, streaming) => {
+      await settle(streaming.send(message('第一段')));
+      expect(sdk.cardCreate.mock.calls[0][0].data.data).toContain('"print_frequency_ms":{"default":50}');
+      expect(sdk.cardCreate.mock.calls[0][0].data.data).toContain('"print_step":{"default":60}');
+      expect(sdk.cardCreate.mock.calls[0][0].data.data).toContain('"print_strategy":"fast"');
+    });
+  });
+
+  it('defaults the entity to four characters every 10 ms', async () => {
+    await settle(adapter.send(message('第一段')));
+    const config = JSON.parse(sdk.cardCreate.mock.calls[0][0].data.data).config.streaming_config;
+    expect(config).toEqual({
+      print_frequency_ms: { default: 10 }, print_step: { default: 4 }, print_strategy: 'delay',
+    });
+    // Four-per-tick at 400 char/s is a chosen speed, not a throughput target: the display is still
+    // allowed to trail a faster model and type the backlog out later. The tick itself stopped paying
+    // off below 10 ms, which is why the remaining knob is print_step.
+    expect(feishuNativePrintRatePerSecond(DEFAULT_FEISHU_NATIVE_PRINT)).toBe(400);
+  });
+
+  it('pushes one page frame per refresh instead of feeding the animation', async () => {
+    await withNativeTurn(DEFAULT_FEISHU_NATIVE_PRINT, async (turn) => {
+      const pushed: number[] = [];
+      const content = sdk.text.getMockImplementation()!;
+      sdk.text.mockImplementation(async (request) => { pushed.push(Date.now()); return content(request); });
+      turn.renderer.onThinkingDelta('第一段思考');
+      await vi.advanceTimersByTimeAsync(REFRESH);
+      for (let elapsed = 0; elapsed < REFRESH * 3; elapsed += REFRESH / 2) {
+        turn.renderer.onThinkingDelta('，继续分析');
+        await vi.advanceTimersByTimeAsync(REFRESH / 2);
+      }
+      // Feishu types the appended tail of each push on its own clock, so steady deltas should be
+      // delivered once per refresh; a faster cadence would only buy entity operations.
+      expect(pushed.length).toBeGreaterThanOrEqual(3);
+      // A frame's content op can land up to one entity-throttle slot after its tick, and the next
+      // frame's op may not pay that slot, so the observed gap is that much shorter than a refresh.
+      for (let index = 1; index < pushed.length; index++) {
+        expect(pushed[index] - pushed[index - 1]).toBeGreaterThanOrEqual(REFRESH - API_INTERVAL_MS);
+      }
+      // Nothing on this path goes through im.message.patch, so 230020 has no way to appear.
+      expect(sdk.imPatch).not.toHaveBeenCalled();
+    });
+  });
+
+  it('keeps a live thought append-only instead of re-cutting its preview every frame', async () => {
+    await withNativeTurn(DEFAULT_FEISHU_NATIVE_PRINT, async (turn) => {
+      const pushes = new Map<string, string[]>();
+      const impl = sdk.text.getMockImplementation()!;
+      sdk.text.mockImplementation((request: any) => {
+        const list = pushes.get(request.path.element_id) ?? [];
+        list.push(String(request.data.content));
+        pushes.set(request.path.element_id, list);
+        return impl(request);
+      });
+      // 12 characters per refresh. The 300-token preview runs out after ~25 of them.
+      for (let index = 0; index < 40; index++) {
+        turn.renderer.onThinkingDelta('新的想法'.repeat(3));
+        await vi.advanceTimersByTimeAsync(REFRESH);
+      }
+      const thought = [...pushes.values()].sort((a, b) => b.length - a.length)[0]!;
+      expect(thought.length).toBeGreaterThan(20);
+      // A moved head is not an edit: the client loses the text and retypes the whole visible tail.
+      const rewrites = thought.filter(
+        (content, index) => index > 0 && !content.startsWith(thought[index - 1]!),
+      ).length;
+      expect(rewrites).toBe(0);
     });
   });
 });

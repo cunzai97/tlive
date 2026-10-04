@@ -1,6 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { Client } from '@larksuiteoapi/node-sdk';
 import {
+  DEFAULT_FEISHU_NATIVE_PRINT,
+  type FeishuNativePrintSettings,
+} from '../../../shared/feishu-card-config.js';
+import {
   assertFeishuCardBudget,
   checkedFeishuResult,
   type CardObject,
@@ -9,8 +13,19 @@ import {
 import { codeBlockBody } from './card-elements.js';
 
 const CHILD_ARRAYS = ['elements', 'columns', 'actions'] as const;
-const API_INTERVAL_MS = 120;
+/** Per-entity serialization floor; a frame's ops land up to this far behind its flush tick. */
+export const API_INTERVAL_MS = 120;
 const STREAM_RENEW_MS = 9 * 60_000;
+const printConfigs = new WeakMap<object, FeishuNativePrintSettings>();
+export function configureNativePrintConfig(
+  client: object,
+  print: FeishuNativePrintSettings,
+): void {
+  printConfigs.set(client, { ...print });
+}
+function getNativePrintConfig(client?: object): FeishuNativePrintSettings {
+  return { ...((client && printConfigs.get(client)) || DEFAULT_FEISHU_NATIVE_PRINT) };
+}
 type OperationKind = 'content' | 'patch' | 'update' | 'settings';
 interface PendingOperation {
   kind: OperationKind;
@@ -77,6 +92,7 @@ function refs(card: CardObject): Map<string, CardObject> {
 export function prepareNativeCard(
   source: CardObject,
   streamElementIds: readonly string[],
+  client?: object,
 ): {
   card: CardObject;
   streamElementIds: string[];
@@ -101,15 +117,16 @@ export function prepareNativeCard(
   (card.body?.elements ?? []).forEach((node: CardObject, index: number) => {
     visit(node, `body/${index}`);
   });
+  const print = getNativePrintConfig(client);
   card.config = {
     ...card.config,
     update_multi: true,
     // false is one byte longer than true: budget the maximum lifecycle metadata.
     streaming_mode: false,
     streaming_config: {
-      print_frequency_ms: { default: 70 },
-      print_step: { default: 1 },
-      print_strategy: 'fast',
+      print_frequency_ms: { default: print.frequencyMs },
+      print_step: { default: print.step },
+      print_strategy: print.strategy,
     },
   };
   refs(card);
@@ -252,9 +269,9 @@ function envelope(card: CardObject): string {
   return JSON.stringify(value);
 }
 /**
- * Text grows by appending, so a plain prefix test keeps what the client already printed. A code
- * block breaks that: its closing fence moves with every delta. Re-fence the held body instead of
- * dropping it, or every structural transition would wipe the thought and reprint it.
+ * Text grows by appending, so a plain prefix test keeps what the client already printed. An element
+ * whose whole body is one code block breaks that: its closing fence moves with every delta. Re-fence
+ * the held body instead of dropping it, or the client would wipe the text and reprint it.
  */
 function acknowledgedPrefix(desired: unknown, acknowledged: unknown): string {
   if (typeof acknowledged !== 'string') return '';

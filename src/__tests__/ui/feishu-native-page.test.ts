@@ -1,6 +1,7 @@
 import type { Client } from '@larksuiteoapi/node-sdk';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { applyNativeCard, createNativeCardState, ensureNativeCard, prepareNativeCard } from '../../server/channels/feishu/native-streaming.js';
+import { applyNativeCard, configureNativePrintConfig, createNativeCardState, ensureNativeCard, prepareNativeCard } from '../../server/channels/feishu/native-streaming.js';
+import { DEFAULT_FEISHU_NATIVE_PRINT } from '../../shared/feishu-card-config.js';
 import { planFeishuCards, type CardObject } from '../../server/channels/feishu/card-budget.js';
 const budget = { maxBytes: 4000, maxElements: 160, maxTables: 4 };
 const source = (text = '第一段'): CardObject => ({ schema: '2.0', config: { update_multi: true }, body: { elements: [
@@ -90,5 +91,20 @@ describe('CardKit page protocol and identity', () => {
     await settle(applyNativeCard(f.client, f.state, next.plan.content, budget, next.ids, false));
     expect(f.settings.mock.calls.some(([request]) => JSON.parse(request.data.settings).config.streaming_mode === true)).toBe(true);
     expect(f.state.streaming).toBe(true);
+  });
+  it('writes the configured print speed into the entity, which is the only knob Feishu animates from', () => {
+    const client = {} as unknown as Client;
+    expect(prepareNativeCard(source(), ['text'], client).card.config.streaming_config).toEqual({
+      print_frequency_ms: { default: DEFAULT_FEISHU_NATIVE_PRINT.frequencyMs },
+      print_step: { default: DEFAULT_FEISHU_NATIVE_PRINT.step },
+      print_strategy: DEFAULT_FEISHU_NATIVE_PRINT.strategy,
+    });
+    configureNativePrintConfig(client, { strategy: 'fast', frequencyMs: 50, step: 60 });
+    expect(prepareNativeCard(source(), ['text'], client).card.config.streaming_config).toEqual({
+      print_frequency_ms: { default: 50 }, print_step: { default: 60 }, print_strategy: 'fast',
+    });
+    // Another client without a configured speed still gets the default, never the first one's numbers.
+    expect(prepareNativeCard(source(), ['text'], {} as unknown as Client).card.config
+      .streaming_config.print_step.default).toBe(DEFAULT_FEISHU_NATIVE_PRINT.step);
   });
 });

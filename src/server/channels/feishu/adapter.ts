@@ -8,8 +8,7 @@ import type {
 } from '../types.js';
 import type { BridgeError } from '../errors.js';
 import { RateLimitError, AuthError, PlatformError, FormatError } from '../errors.js';
-import { FeishuStreamingSession } from './streaming.js';
-import { hasNativeCardApi } from './native-streaming.js';
+import { configureNativePrintConfig } from './native-streaming.js';
 import { FeishuFormatter } from './formatter.js';
 import { FEISHU_POLICY } from './policy.js';
 import type { FeishuRenderedMessage } from './types.js';
@@ -23,7 +22,6 @@ import {
   pinFeishuMessage,
   publishFeishuTopicMetadata,
   sendFeishuMessage,
-  shouldSplitFeishuProgressMessage,
   startFeishuThreadFromMessage,
   startFeishuThreadWithTitle,
 } from './sender.js';
@@ -84,6 +82,9 @@ export class FeishuAdapter extends BaseChannelAdapter<FeishuRenderedMessage> {
         maxBytes: this.options.cardFlow.maxBytes,
         maxElements: this.options.cardFlow.maxElements,
       });
+      if (this.options.cardFlow.nativePrint) {
+        configureNativePrintConfig(this.client, this.options.cardFlow.nativePrint);
+      }
     }
     this.configureFormatter();
     await this.resolveBotIdentity();
@@ -247,38 +248,6 @@ export class FeishuAdapter extends BaseChannelAdapter<FeishuRenderedMessage> {
       // Earlier pages may have succeeded even if an overflow operation failed.
       if (this.client) this.bindToolDetails(message, messageId);
     }
-  }
-
-  override usesNativeProgressStreaming(): boolean {
-    return (
-      this.options.cardFlow?.mode !== 'legacy' &&
-      this.options.cardFlow?.nativeStreaming === true &&
-      !!this.client &&
-      hasNativeCardApi(this.client)
-    );
-  }
-
-  createStreamingSession(
-    chatId: string,
-    receiveIdType?: string,
-    replyToMessageId?: string,
-    header?: { template: string; title: string },
-    replyInThread?: boolean,
-  ): FeishuStreamingSession | null {
-    if (!this.client) return null;
-    return new FeishuStreamingSession({
-      client: this.client,
-      chatId,
-      receiveIdType,
-      replyToMessageId,
-      header,
-      replyInThread,
-      classifyError: (error) => this.classifyError(error),
-    });
-  }
-
-  override shouldSplitProgressMessage(message: FeishuRenderedMessage): boolean {
-    return shouldSplitFeishuProgressMessage(message, this.client ?? undefined);
   }
 
   async sendTyping(_chatId: string): Promise<void> {
